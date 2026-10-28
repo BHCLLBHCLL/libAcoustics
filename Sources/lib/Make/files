@@ -1,6 +1,7 @@
 
 SoundObserver/SoundObserver.C
 FoamFourierAnalysis/FoamFftwDriver.C
+mingwStdCompat.C
 
 /* Acoustic analogies */
 analogies/AcousticAnalogy/AcousticAnalogy.C
