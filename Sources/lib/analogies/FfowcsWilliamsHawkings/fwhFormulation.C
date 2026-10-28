@@ -1,10 +1,15 @@
 #include "FfowcsWilliamsHawkings.H"
 #include "fwhFormulation.H"
 
-Foam::functionObjects::fwhFormulation::fwhFormulation(const FfowcsWilliamsHawkings& fwh)
+Foam::functionObjects::fwhFormulation::fwhFormulation
+(
+    const FfowcsWilliamsHawkings& fwh,
+    const bool storeFaceHistory
+)
 :
     fwh_(fwh),
     fwhProbeI_(0),
+    storeFaceHistory_(storeFaceHistory),
     qds_(0),
     fds_(0),
     tobs_(0),
@@ -21,17 +26,21 @@ Foam::functionObjects::fwhFormulation::fwhFormulation(const FfowcsWilliamsHawkin
 
 void Foam::functionObjects::fwhFormulation::initialize()
 {
-    //allocate qds_, fds_ and vds_
-    qds_.resize(fwh_.observers_.size());
-    fds_.resize(fwh_.observers_.size());
-    forAll(fwh_.observers_, iObs)
+    // Per-face time histories are only kept by formulations that still
+    // search them (GT). Farassat 1A deposits onto one signal per observer.
+    if (storeFaceHistory_)
     {
-        qds_[iObs].resize(fwh_.controlSurfaces_.size());
-        fds_[iObs].resize(fwh_.controlSurfaces_.size());
-        forAll(fwh_.controlSurfaces_, iSurf)
+        qds_.resize(fwh_.observers_.size());
+        fds_.resize(fwh_.observers_.size());
+        forAll(fwh_.observers_, iObs)
         {
-            qds_[iObs][iSurf].resize(fwh_.controlSurfaces_[iSurf].Cf().size());
-            fds_[iObs][iSurf].resize(fwh_.controlSurfaces_[iSurf].Cf().size());
+            qds_[iObs].resize(fwh_.controlSurfaces_.size());
+            fds_[iObs].resize(fwh_.controlSurfaces_.size());
+            forAll(fwh_.controlSurfaces_, iSurf)
+            {
+                qds_[iObs][iSurf].resize(fwh_.controlSurfaces_[iSurf].Cf().size());
+                fds_[iObs][iSurf].resize(fwh_.controlSurfaces_[iSurf].Cf().size());
+            }
         }
     }
 

@@ -76,6 +76,12 @@ public:
         //-
         bool varTimeStep_;
 
+        //- True after one complete pass over the faces
+        bool haveOld_;
+
+        //- True after two complete passes; enables the fixed-step stencil
+        bool haveOldOld_;
+
         //-
         scalar prevt_;
 
@@ -97,6 +103,8 @@ public:
         tdPrimitive(T initv, scalar tprev)
         :
             varTimeStep_(false),
+            haveOld_(false),
+            haveOldOld_(false),
             prevt_(tprev),
             deltat_(tprev),
             new_(1, initv),
@@ -110,6 +118,8 @@ public:
         tdPrimitive()
         :
             varTimeStep_(false),
+            haveOld_(false),
+            haveOldOld_(false),
             prevt_(0.0),
             deltat_(GREAT),
             new_(1, pTraits<T>::zero),
@@ -124,7 +134,23 @@ public:
 
         void resize(label newsz)
         {
-            new_.resize(newsz);
+            if (new_.size() != newsz)
+            {
+                new_.resize(newsz);
+                haveOld_ = false;
+                haveOldOld_ = false;
+            }
+
+            // One allocation for the whole face list. dot() must not grow
+            // these one face at a time: List::resize copies the array.
+            if (old_.size() != newsz)
+            {
+                old_.resize(newsz);
+            }
+            if (oldOld_.size() != newsz)
+            {
+                oldOld_.resize(newsz);
+            }
         }
         
         void setTimeStepVariable(bool adjustTimeStep)
@@ -149,7 +175,13 @@ public:
 
         T dot(scalar newt, label idx)
         {
-            T dvdt (pTraits<T>::zero);
+            if (old_.size() != new_.size() || oldOld_.size() != new_.size())
+            {
+                old_.resize(new_.size());
+                oldOld_.resize(new_.size());
+                haveOld_ = false;
+                haveOldOld_ = false;
+            }
 
             if (newt > prevt_)
             {
@@ -157,32 +189,35 @@ public:
                 prevt_ = newt;
             }
 
-            if (old_.size() <= idx)
+            T dvdt = pTraits<T>::zero;
+
+            if (!haveOld_)
             {
-                old_.resize(idx+1);
-                old_[idx] = new_[idx];
                 dvdt = new_[idx] / deltat_;
+            }
+            else if (varTimeStep_ || !haveOldOld_)
+            {
+                dvdt = (new_[idx] - old_[idx]) / deltat_;
             }
             else
             {
-                if ((oldOld_.size() <= idx) || (varTimeStep_))
-                {
-                    dvdt = (new_[idx] - old_[idx])/deltat_;
-                    oldOld_.resize
-                    (
-                        idx+1
-                    );
-                    oldOld_[idx] = old_[idx];
-                    old_[idx] = new_[idx];
-
-                }
-                else
-                {
-                    dvdt = (3.0*new_[idx] - 4.0*old_[idx] + oldOld_[idx]) / 2.0 / deltat_;
-                    oldOld_[idx] = old_[idx];
-                    old_[idx] = new_[idx];
-                }
+                dvdt =
+                    (3.0*new_[idx] - 4.0*old_[idx] + oldOld_[idx])
+                    / 2.0 / deltat_;
             }
+
+            oldOld_[idx] = old_[idx];
+            old_[idx] = new_[idx];
+
+            if (idx == new_.size() - 1)
+            {
+                if (haveOld_)
+                {
+                    haveOldOld_ = true;
+                }
+                haveOld_ = true;
+            }
+
             return dvdt;
         }
 

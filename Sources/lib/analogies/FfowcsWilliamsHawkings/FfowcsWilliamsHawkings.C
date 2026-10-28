@@ -32,8 +32,6 @@ License
 //sample surface
 #include "IOmanip.H"
 #include "volPointInterpolation.H"
-#include "PatchTools.H"
-
 #include "ListListOps.H"
 #include "stringListOps.H"
 #include "surfaceFields.H"
@@ -89,6 +87,7 @@ Foam::functionObjects::FfowcsWilliamsHawkings::FfowcsWilliamsHawkings
     pInf_(0.0),
     fwhFormulationPtr_(nullptr),
     cleanFreq_(100),
+    acousticDeltaT_(0),
     interpolationScheme_(word::null),
     controlSurfaces_(0),
     mergeList_(0)
@@ -123,6 +122,7 @@ Foam::functionObjects::FfowcsWilliamsHawkings::FfowcsWilliamsHawkings
     pInf_(0.0),
     fwhFormulationPtr_(nullptr),
     cleanFreq_(100),
+    acousticDeltaT_(0),
     interpolationScheme_(word::null),
     controlSurfaces_(0),
     mergeList_(0)
@@ -231,6 +231,9 @@ bool Foam::functionObjects::FfowcsWilliamsHawkings::read(const dictionary& dict)
 
     cleanFreq_ = dict.lookupOrDefault("cleanFreq",100);
 
+    // 0: Farassat 1A picks the deltaT of the first probe.
+    acousticDeltaT_ = dict.lookupOrDefault<scalar>("acousticDeltaT", 0);
+
     const fvMesh& mesh = refCast<const fvMesh>(obr_);
 
     PtrList<sampledSurface> newList
@@ -334,30 +337,62 @@ void Foam::functionObjects::FfowcsWilliamsHawkings::correct()
 
     if (fwhFormulationPtr_.valid())
     {
+        // Sample each surface once. Pressure and velocity do not depend on
+        // the observer, so the previous observer loop repeated this work.
+        List<vectorField> uSamples(controlSurfaces_.size());
+        List<scalarField> rhoSamples(controlSurfaces_.size());
+        List<scalarField> pSamples(controlSurfaces_.size());
+
+        forAll(controlSurfaces_, iSurf)
+        {
+            const sampledSurface& surf = controlSurfaces_[iSurf];
+            if (surf.interpolate())
+            {
+                Info<< "WARNING: Interpolation for surface " << surf.name() << " is on, turn it off"
+                << endl;
+            }
+
+            uSamples[iSurf] = surfaceVelocity(surf);
+            rhoSamples[iSurf] = surfaceDensity(surf);
+            pSamples[iSurf] = surfacePressure(surf)() - pInf_;
+        }
+
+        // Farassat returns one surface. GT's readout already sums every
+        // surface, and the last call is the value previously written.
+        const bool sumSurfaces =
+            (formulationType_ == "Farassat1AFormulation");
+
         forAll(observers_, iObs)
         {
+            scalar oapSum = 0.0;
+            scalar oapLast = 0.0;
+
             forAll(controlSurfaces_, iSurf)
             {
-                const sampledSurface& surf = controlSurfaces_[iSurf];
-                if (surf.interpolate())
-                {
-                    Info<< "WARNING: Interpolation for surface " << surf.name() << " is on, turn it off"
-                    << endl;
-                }
+                const vectorField& Sf = controlSurfaces_[iSurf].Sf();
 
-                const vectorField& Sf = surf.Sf();
-                const vectorField uS (surfaceVelocity(surf)());
-                const scalarField rhoS (surfaceDensity(surf)());
-                const scalarField pS (surfacePressure(surf)() - pInf_);
+                oapLast = fwhFormulationPtr_->observerAcousticPressure
+                (
+                    Sf,
+                    uSamples[iSurf],
+                    rhoSamples[iSurf],
+                    pSamples[iSurf],
+                    iObs,
+                    iSurf,
+                    ct
+                );
 
-                scalar oap = fwhFormulationPtr_->observerAcousticPressure(Sf, uS, rhoS, pS, iObs, iSurf, ct);
+                oapSum += oapLast;
 
                 if (Pstream::master())
                 {
-                    SoundObserver& obs = observers_[iObs];
-                    obs.apressure(oap); //appends new calculated acoustic pressure
-                    Log<<"OAP = "<< oap <<nl;
+                    Log<<"OAP = "<< oapLast <<nl;
                 }
+            }
+
+            if (Pstream::master())
+            {
+                observers_[iObs].apressure(sumSurfaces ? oapSum : oapLast);
             }
         }
     }
@@ -529,58 +564,14 @@ bool Foam::functionObjects::FfowcsWilliamsHawkings::update()
         return updated;
     }
 
-    // Serial: quick and easy, no merging required
-    // Just like sampledSurfaces
-
-    if (!Pstream::parRun())
-    {
-        forAll(controlSurfaces_, surfI)
-        {
-            if (controlSurfaces_.operator[](surfI).update())
-            {
-                updated = true;
-            }
-        }
-
-        return updated;
-    }
-
-    const fvMesh& mesh = refCast<const fvMesh>(obr_);
-
-    // Dimension as fraction of mesh bounding box
-    scalar mergeDim = mergeTol_ * mesh.bounds().mag();
-
-    if (Pstream::master() && debug)
-    {
-      Pout<< nl << "Merging all points within "
-          << mergeDim << " metre" << endl;
-    }
-
+    // Each rank integrates its own patch faces and the pressure is reduced
+    // afterwards. The merged global patch was stored and never read.
     forAll(controlSurfaces_, surfI)
     {
-        sampledSurface& s = controlSurfaces_.operator[](surfI);
-
-        if (s.update())
+        if (controlSurfaces_[surfI].update())
         {
             updated = true;
         }
-        else
-        {
-            continue;
-        }
-
-        PatchTools::gatherAndMerge
-        (
-            mergeDim,
-            primitivePatch
-            (
-                SubList<face>(s.faces(), s.faces().size()),
-                s.points()
-            ),
-            mergeList_[surfI].points,
-            mergeList_[surfI].faces,
-            mergeList_[surfI].pointsMap
-        );
     }
 
     return updated;

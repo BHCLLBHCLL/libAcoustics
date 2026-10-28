@@ -36,6 +36,10 @@ protected:
     //-
     label fwhProbeI_;
 
+    //- Per-face qds_/fds_ histories. Farassat 1A leaves this false and
+    //  accumulates one signal per observer instead.
+    bool storeFaceHistory_;
+
     //-
     surfaceTimeData qds_;
     
@@ -88,7 +92,11 @@ private:
 public:
     
     //- constructs using given analogy object
-    fwhFormulation(const FfowcsWilliamsHawkings& analogy);
+    fwhFormulation
+    (
+        const FfowcsWilliamsHawkings& analogy,
+        const bool storeFaceHistory = true
+    );
     
     //-
     virtual ~fwhFormulation();

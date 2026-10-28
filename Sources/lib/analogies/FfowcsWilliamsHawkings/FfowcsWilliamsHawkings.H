@@ -151,6 +151,9 @@ private:
         //
         label cleanFreq_;
 
+        //- Farassat 1A observer-signal spacing. 0 adopts the first probe deltaT.
+        scalar acousticDeltaT_;
+
         //- Interpolation scheme to use for sampling
         word interpolationScheme_;
 

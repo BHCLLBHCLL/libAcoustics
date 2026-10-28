@@ -88,12 +88,12 @@ TEST_CASE("Checks expired functionality in the libAcoustics", "[testFormulationF
                 vector normals = Sf[iFace]/magSf[iFace];
                 uS[iFace] = 0*normals;
             }
-            fwhFormulation1.observerAcousticPressure(Sf, uS, rhoS, pS, iObs, iSurf, t);
+            const scalar oap = fwhFormulation1.observerAcousticPressure(Sf, uS, rhoS, pS, iObs, iSurf, t);
+            REQUIRE (oap == oap);
         }
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][0].first().size() == 10);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][0].second().size() == 10);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][99].first().size() == 10);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][99].second().size() == 10);
+        // Farassat 1A no longer keeps a per-face emission history.
+        REQUIRE (fwhFormulation1.getQdsData().size() == 0);
+        REQUIRE (fwhFormulation1.getFdsData().size() == 0);
     }
 
     SECTION ("Test with clear function")
@@ -112,13 +112,12 @@ TEST_CASE("Checks expired functionality in the libAcoustics", "[testFormulationF
                 vector normals = Sf[iFace]/magSf[iFace];
                 uS[iFace] = 0*normals;
             }
-            fwhFormulation1.observerAcousticPressure(Sf, uS, rhoS, pS, iObs, iSurf, t);
+            const scalar oap = fwhFormulation1.observerAcousticPressure(Sf, uS, rhoS, pS, iObs, iSurf, t);
             fwhFormulation1.clearExpiredData();
+            REQUIRE (oap == oap);
         }
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][0].first().size() == 3);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][0].second().size() == 3);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][99].first().size() == 3);
-        REQUIRE (fwhFormulation1.getQdsData()[0][0][99].second().size() == 3);
+        REQUIRE (fwhFormulation1.getQdsData().size() == 0);
+        REQUIRE (fwhFormulation1.getFdsData().size() == 0);
     }
 
 }
