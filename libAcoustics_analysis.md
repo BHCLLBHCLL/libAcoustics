@@ -5,10 +5,7 @@
 - 流动：`D:\training\cradle\laptop\laptop_thermal_steady_scaled_v3_transient\openfoam`
 - 流动加声学：`D:\training\cradle\laptop\laptop_thermal_steady_scaled_v3_transient\openfoam_fwh`
 
-库源码（与正在运行的 `libAcoustics.dll` 同一套）：
-
-- `D:\training\openfoam\libAcoustics-2412`
-- WSL：`/home/sdcll221/work/tries/of_mingw/libAcoustics-2412`
+本文前半（到「效率提升方案」为止）描述最初 `v2412`（`04f8a7a`）的性能。当前分支已按该方案改过导数分配、采样和 Farassat 读出，并修正了面速度。源码仓库是 `D:\training\libAcoustics`，分支 `v2412`。算法对照、最初版本的正确性错误和这些修改见文末。
 
 求解器为 OpenFOAM v2412 `pimpleFoam -parallel`，8 进程。声学对象为 `FwhImpellers`（`fixedResponseDelay false`）和 `FwhImpellersFixedDelay`（`fixedResponseDelay true`），公式均为 `Farassat1AFormulation`。
 
@@ -142,6 +139,8 @@ rank 3、189609 个面、6 个麦克风、4 条双精度序列：
 
 ## 调用链
 
+下面是最初 `04f8a7a` 的路径。当前分支的采样在麦克风循环之外，Farassat 读观测时间网格，并且在 `correct()` 末尾更新 `Cf0`。
+
 ```
 Time::run()
   functionObjectList::execute()
@@ -264,3 +263,74 @@ T dot(const scalar newt, const label idx)
 | 修好 `resize`，并去掉重复采样和 `gatherAndMerge` | 约 3–4 分钟，由流动决定 | 不能，数千步后内存满 |
 | 再改成麦克风信号累加 | 仍约 3–4 分钟 | 能，声学内存为数 MB |
 | 再把 `probeFrequency` 提到 20、只留一个函数对象 | 流动时间不变，声学按倍数下降 | 能 |
+
+算例侧的 `probeFrequency`、函数对象个数和 `laptop_wall` 仍由算例字典决定，库没有改这些默认值。可选关键字 `acousticDeltaT` 为 0 时，Farassat 输出网格采用第一次声学采样的 `deltaT`。
+
+## 最初 v2412 的正确性错误
+
+Farassat 1A 的被积函数在最初版本里是对的。厚度项、载荷项、`1/(1-Mr)`、到达时间 `ct + R/c0` 和除以 `4π` 都是 FW-H 固体表面积分。下面两处实现会把结果算错。变步长下 `List::resize` 的平方代价只拖慢计算，不改变差分公式。
+
+### 面速度在每步都采样时是错的
+
+`nonUniformSurfaceMotion` 使用
+
+```text
+vS = (当前面心 - Cf0) / deltaT
+```
+
+`Cf0` 只在跳过声学采样的那些步里更新（`probeI % probeFrequency != 0`）。`probeFrequency` 为 1 时没有跳过的步，`Cf0` 停在初始化时的位置，也就是 `t = 0`。第一步的位移还是一个 `deltaT`。从第二步起，分子变成从初始位置到现在的总位移，除数仍是一个 `deltaT`。这个速度不是表面在该步的运动速度。
+
+叶轮转速约 `628 rad/s`。总位移随时间增大后，虚假马赫数会穿过 1。Farassat 的 `1/(1-Mr)` 随之发散。`openfoam_fwh_m3`（`adjustTimeStep no`，`deltaT = 1e-5`）里可以看到这个现象：到 `t = 0.005` 最大 Courant 数仍约 5，静止的 `laptop_wall` 声压停留在数帕到约 20 Pa，两个叶轮从 `t ≈ 0.0019` 的 1 Pa 量级在 `t = 0.00219` 升到 `1e7`–`1e10`，随后到 `1e17`。
+
+`probeFrequency` 大于 1 时，被跳过的步会把 `Cf0` 更新到当前面心，采样那一步的速度仍是一个 `deltaT` 的位移。
+
+### 多个积分面时结果文件只保留最后一个面
+
+`SoundObserver::apressure(scalar)` 会覆盖该麦克风当前的 `p'`。最初的 `correct()` 在每个源面里都调用它，因此 `acousticData` 里的 `p'` 只剩循环中的最后一个面。日志里的逐面 `OAP` 仍是各面自己的值。FW-H 要求的是全部积分面上的和。
+
+## 当前实现与最初算法
+
+面源公式和导数格式与最初 `v2412` 相同。Farassat 的时间历史读出、结果文件里的 `p'`，以及 `probeFrequency` 为 1 时的面速度，和最初代码不相同。
+
+相同的部分：
+
+- 厚度项和载荷项仍是原来的 Farassat 1A，查询时刻仍是 `ct + deltaT×1e-6`。
+- 导数仍是第一步 `新值/deltaT`，变步长一阶差分，定步长从第三步起 BDF2。每个面只推进一次。最初每个麦克风各有一套相同模板，数值一样。
+- GT 公式仍按原来的逐面 `valueAt` 求和。
+
+不相同的部分：
+
+- 最初每个面保存整段 `(时间, q)` 和 `(时间, f)`，读声压时在查询时刻对每个面线性插值再求和。现在把 `q+f` 涂到间距为 `acousticDeltaT` 的均匀时间网格上再读取。网格步长等于流动步长、查询落在节点上时，节点值等于各面线性插值之和。查询比节点晚 `deltaT×1e-6`，带进相邻节点的比例是 `1e-6`。网格比流动步长粗时，输出信号的时间分辨率低于最初的逐面历史。
+- 结果文件中的 `p'` 现在是各面之和。日志里每个面的 `OAP` 仍单独打印。
+- 每次采样之后把 `Cf0` 写成当前面心。采样窗口之外网格仍在运动时也会更新 `Cf0`，避免窗口开始后的第一步把多步位移除以一个 `deltaT`。`probeFrequency` 为 1 时，面速度因此是这一个时间步的位移，不再是最初 `v2412` 的总位移。
+
+`PatchTools::gatherAndMerge` 已从积分路径去掉。积分本来就用本进程上的面，再对声压标量做 `reduce`。
+
+Windows 上的 OpenFOAM 自带 GCC 7 的 `libstdc++`，没有 GCC 13 MinGW 从 `<iostream>` 引用的 `std::ios_base_library_init`。`mingwStdCompat.C` 在本库内提供该符号，只为让 DLL 能被加载，不参与声压计算。
+
+## 与 FW-H 定义
+
+当前算法仍是 Farassat 1A。上面三处和旧代码不同的地方没有改成另一种声类比。
+
+- 均匀网格是在各面自己的线性插值上取样。节点上的值就是延迟时刻的面积分。
+- 文件中的 `p'` 覆盖全部积分面，与 FW-H 的面积分一致。最初的文件只留下最后一个面。
+- 面速度是一个 `deltaT` 内的位移，对应 Farassat 1A 里的表面运动速度。最初在 `probeFrequency` 为 1 时用的总位移不符合这个定义。
+
+体积四极子项最初的库就没有，这次也没有加。
+
+这种风扇的表面马赫数停留在 1 以下，叶尖速度约每秒几十米。修正 `Cf0` 之后，程序使用的面速度就是该步的实际位移，到达时间每步向前。网格上每个节点只接收一次各面的延迟贡献。最初版本里叶轮声压发散，是虚假面速度穿过声速造成的，不是这个场景的流动马赫数超过了 1。
+
+## 已做的代码修改
+
+相对 `04f8a7a`，当前分支包含：
+
+| 修改 | 位置 |
+|---|---|
+| `tdPrimitive` 一次分配导数历史，差分公式不变 | `AcousticAnalogy.H` |
+| 每个源面只采样一次，`L`/`M`/`Un` 每步只推进一次 | `FfowcsWilliamsHawkings.C`、`Farassat1AFormulation.C` |
+| 去掉积分路径上的 `gatherAndMerge` | `FfowcsWilliamsHawkings.C` |
+| Farassat 改为观测时间网格，不再保存逐面 `qds_`/`fds_` | `Farassat1AFormulation.C`、`fwhFormulation.C` |
+| 可选 `acousticDeltaT`，0 表示采用第一次采样的 `deltaT` | `FfowcsWilliamsHawkings.C` |
+| Farassat 的 `p'` 写各面之和 | `FfowcsWilliamsHawkings.C` |
+| 采样后更新 `Cf0`；采样窗口外也更新 | `FfowcsWilliamsHawkings.C`、`AcousticAnalogy.C` |
+| 提供 `ios_base_library_init`，供 GCC 7 运行库加载 | `mingwStdCompat.C` |

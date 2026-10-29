@@ -412,6 +412,18 @@ void Foam::functionObjects::FfowcsWilliamsHawkings::correct()
     {
         fwhFormulationPtr_->clearExpiredData();
     }
+
+    // vS has already used the previous face centres. Advance Cf0 to this
+    // surface so the next probe divides one deltaT of travel. With
+    // probeFrequency 1 the skipped-probe path never refreshes Cf0, and the
+    // velocity would otherwise be the whole displacement since t = 0.
+    if (nonUniformSurfaceMotion_)
+    {
+        forAll(controlSurfaces_, iSurf)
+        {
+            Cf0_[iSurf] = controlSurfaces_[iSurf].Cf();
+        }
+    }
 }
 
 

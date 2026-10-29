@@ -257,6 +257,9 @@ bool Foam::functionObjects::AcousticAnalogy::write()
 
     if ( (cTime < timeStart_) || (cTime > timeEnd_))
     {
+        // The mesh still moves outside the sampling window. Keep Cf0 on
+        // the current surface so the first in-window velocity is one step.
+        updateSurfaceCf();
         return true;
     }
 
