@@ -1,5 +1,6 @@
 #include "FfowcsWilliamsHawkings.H"
 #include "fwhFormulation.H"
+#include "sampledPatch.H"
 
 Foam::functionObjects::fwhFormulation::fwhFormulation
 (
@@ -120,42 +121,72 @@ void Foam::functionObjects::fwhFormulation::initialize()
         }
     }
 
-    //calculate normals
-    List<vector> Cs(fwh_.controlSurfaces_.size());
+    // Allocate and set the initial face normals. Patch surfaces use the
+    // reversed patch normal; other surfaces use the centroid heuristic.
     ni_.resize(fwh_.controlSurfaces_.size());
     nl_.resize(fwh_.controlSurfaces_.size());
-    forAll(ni_, iSurf)
-    {
-        const vectorField& Sf = fwh_.controlSurfaces_[iSurf].Sf();
-        const vectorField& Cf = fwh_.controlSurfaces_[iSurf].Cf();
-        ni_[iSurf].resize(Cf.size());
-        nl_[iSurf].resize(Cf.size());
-        Cs[iSurf] = gSum(Cf);
-        scalar surfSize = scalar(Cf.size());
-        reduce (surfSize, sumOp<scalar>());
-        Cs[iSurf] /= surfSize;
-        
-        scalar magSf = 0.0;
-        forAll(ni_[iSurf], iFace)
-        {
-            magSf = mag(Sf[iFace]);
-            ni_[iSurf].value(iFace) = Sf[iFace]/magSf;
-
-            if ( ((Cf[iFace] - Cs[iSurf]) & ni_[iSurf].value(iFace)) > 0 )
-            {
-                nl_[iSurf][iFace] = 1.0;
-            }
-            else
-            {
-                nl_[iSurf][iFace] = -1.0;
-            }
-            ni_[iSurf].value(iFace) *= nl_[iSurf][iFace];
-        }
-    }
+    updateNormals();
 }
 
 Foam::functionObjects::fwhFormulation::~fwhFormulation()
 {
+}
+
+void Foam::functionObjects::fwhFormulation::updateNormals()
+{
+    forAll(ni_, iSurf)
+    {
+        const sampledSurface& surf = fwh_.controlSurfaces_[iSurf];
+        const vectorField& Sf = surf.Sf();
+        const vectorField& Cf = surf.Cf();
+
+        if (ni_[iSurf].size() != Cf.size())
+        {
+            ni_[iSurf].resize(Cf.size());
+        }
+        if (nl_[iSurf].size() != Cf.size())
+        {
+            nl_[iSurf].resize(Cf.size());
+        }
+
+        // A patch surface is a solid wall: the OpenFOAM patch normal points
+        // from the fluid into the solid, so the FW-H normal is its negative.
+        // A centroid is not used here: a closed but non-convex wall group has
+        // no single interior point, and the unweighted face-centre average
+        // can lie on the fluid side, which reverses most of the faces.
+        if (isA<sampledPatch>(surf))
+        {
+            forAll(Cf, iFace)
+            {
+                const scalar magSf = mag(Sf[iFace]);
+                ni_[iSurf].value(iFace) = -Sf[iFace]/magSf;
+                nl_[iSurf][iFace] = -1.0;
+            }
+        }
+        else
+        {
+            vector Cs = gSum(Cf);
+            scalar surfSize = scalar(Cf.size());
+            reduce(surfSize, sumOp<scalar>());
+            Cs /= surfSize;
+
+            forAll(Cf, iFace)
+            {
+                const scalar magSf = mag(Sf[iFace]);
+                ni_[iSurf].value(iFace) = Sf[iFace]/magSf;
+
+                if (((Cf[iFace] - Cs) & ni_[iSurf].value(iFace)) > 0)
+                {
+                    nl_[iSurf][iFace] = 1.0;
+                }
+                else
+                {
+                    nl_[iSurf][iFace] = -1.0;
+                }
+                ni_[iSurf].value(iFace) *= nl_[iSurf][iFace];
+            }
+        }
+    }
 }
 
 Foam::scalar Foam::functionObjects::fwhFormulation::observerAcousticPressure
@@ -265,34 +296,8 @@ void Foam::functionObjects::fwhFormulation::update()
             }
         }
 
-        //Update normals
-        List<vector> Cs(fwh_.controlSurfaces_.size());
-        forAll(ni_, iSurf)
-        {
-            const vectorField& Sf = fwh_.controlSurfaces_[iSurf].Sf();
-            const vectorField& Cf = fwh_.controlSurfaces_[iSurf].Cf();
-            Cs[iSurf] = gSum(Cf);
-            scalar surfSize = scalar(Cf.size());
-            reduce (surfSize, sumOp<scalar>());
-            Cs[iSurf] /= surfSize;
-            scalar magSf = 0.0;
-            
-            forAll(ni_[iSurf], iFace)
-            {
-                magSf = mag(Sf[iFace]);
-                ni_[iSurf].value(iFace) = Sf[iFace]/magSf;
-
-                if ( ((Cf[iFace] - Cs[iSurf]) & ni_[iSurf].value(iFace)) > 0 )
-                {
-                    nl_[iSurf][iFace] = 1.0;
-                }
-                else
-                {
-                    nl_[iSurf][iFace] = -1.0;
-                }
-                ni_[iSurf].value(iFace) *= nl_[iSurf][iFace];
-            }
-        }
+        // Update normals
+        updateNormals();
     }
     
     //Update retarted time

@@ -79,6 +79,9 @@ protected:
     //-
     void initialize();
 
+    //- Set the face normals from the surface geometry
+    void updateNormals();
+
 
 
     
