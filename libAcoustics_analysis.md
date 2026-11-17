@@ -3,15 +3,16 @@
 > 分支：`v2412`（`origin/v2412`）
 > 基准：最初 `v2412` 为 `04f8a7a`；本文写作时的分支头为 `72eea13`，本次在其上增加 patch 表面法向修复。
 > 源码：`/home/ubuntu/programs/libAcoustics`
-> 日期：2026-11-16
+> 日期：2026-11-16（2026-11-17 补充实测对比）
 
-本文把三类内容分开：
+本文把四类内容分开：
 
 1. **性能分析**：最初 `v2412` 在 Windows 8 rank 算例上的平方分配、并行和内存问题；
 2. **性能与正确性修改**：当前分支已经合入的导数分配、采样、Farassat 观测网格、面速度、多面求和等；
-3. **本次新增的 patch 法向修复**：`laptop_wall` 的 7 个 patch 是闭合壁面，原质心启发式只翻转了 14.5% 的面，导致壁面压力载荷的符号和相消关系错误。本文给出源码路径、几何验证、运行数据、修复方法和与 Cradle scFLOW 的差异。
+3. **patch 法向修复**：`laptop_wall` 的 7 个 patch 是闭合壁面，原质心启发式只翻转了 14.5% 的面，导致壁面压力载荷的符号和相消关系错误。本文给出源码路径、几何验证、修复方法和与 Cradle scFLOW 的差异；
+4. **2026-11-17 实测复核**：新库 `_m1` 与旧库 `_all` 的 OAP、总声压、SPL、A 计权及 20–50 kHz 全频带对比。结论是法向修复解决了直流/低频，但 5–20 kHz 的壁面宽带仍然存在。
 
-> 注意：性能节的绝对时间来自最初的 Windows 8 rank 运行；法向节的 OAP 数据来自 Linux 48 rank 的 `openfoam_fwh_m4_all` 运行。两套数据的网格、进程数和时间步不同，**不要直接混用绝对时间**。
+> 注意：性能节的绝对时间来自最初的 Windows 8 rank 运行；法向节的 OAP 数据来自 Linux 48 rank 的 `openfoam_fwh_m4_all`（旧库）和 `openfoam_fwh_m4_all_m1`（新库）运行；第 9 节另用 `openfoam_fwh_m4`（叶轮单独）作基线。几套数据的网格、进程数和时间步不同，**不要直接混用绝对时间**。
 
 ---
 
@@ -25,7 +26,8 @@
 - [5. patch 表面法向定向（本次修复，重点）](#5-patch-表面法向定向本次修复重点)
 - [6. 修改清单](#6-修改清单)
 - [7. 验证与复现](#7-验证与复现)
-- [8. 结论与后续](#8-结论与后续)
+- [8. 阶段性结论](#8-阶段性结论)
+- [9. 实测复核（2026-11-17）](#9-实测复核2026-11-17)
 
 ---
 
@@ -77,6 +79,8 @@ else                      n 翻;
 总 `p'` RMS 从叶轮单独的 **0.0595 Pa** 增到 **0.194 Pa**（约 **+10.3 dB**）；5–20 kHz 约 **+23 dB**（相对叶轮之和；相对单个叶轮约 +25 dB）。wall 与叶轮的相关系数只有 **-0.007**，说明它不是叶轮力的物理反作用，而是壁面压力被错误法向积分出来的独立信号。
 
 修复：`fwhFormulation::updateNormals()` 对 `isA<sampledPatch>` 的表面直接使用 `-Sf/|Sf|`；其他表面（STL/sampledSurface）保留质心启发式。叶轮是封闭凸体，原启发式本来就翻对了 99.8%，修复后仍用 `-Sf`，结果不变。
+
+> **2026-11-17 实测修正**：上表的 0.197/0.193 Pa 和“独立信号”描述来自旧库的早期窗口。新库实测表明，法向修复把 wall 的直流/20–200 Hz 明显降下来，但 5–20 kHz 基本不变（0.176→0.178 Pa），总 `p'` 只从 0.190 降到 0.186 Pa。也就是说，“法向错误导致壁面声压大”只对低频/直流成立；5–20 kHz 的 wall 项是壁面压力载荷本身，不是法向符号问题。完整数据见第 9 节。
 
 ---
 
@@ -641,9 +645,9 @@ wmake -j 8
 LIB = $(FOAM_USER_LIBBIN)/libAcoustics_fix
 ```
 
-编译通过，产物为 `libAcoustics_fix.so`；提交前已把 `Make/files` 改回 `libAcoustics`。正式使用前需要在算例停止后重新 `wmake`，生成/安装 `libAcoustics.so`，或把算例的 `libs` 指向 `libAcoustics_fix.so` 做短段验证。
+编译通过，产物为 `libAcoustics_fix.so`；提交前已把 `Make/files` 改回 `libAcoustics`。2026-11-16 23:54 已用 `makeLibrary.sh` 正式生成并安装 `libAcoustics.so`，第 9 节的 `_m1` 运行加载的就是它（`/proc/<pid>/maps` 确认）。
 
-另用 `Tutorials/vortexShed` 的 `cylinder` patch 做了 2 步单进程冒烟测试（`libs ("libAcoustics_fix.so")`）：FWH 对象正常加载、采样并输出 `OAP`，无崩溃。该测试只验证 `sampledPatch` 分支的运行路径；圆柱是凸体，新旧法向本来就一致，不能用来验证 `laptop_wall` 的符号。`laptop_wall` 的符号由 7.2 的几何检查和 7.3 的运行数据说明。
+另用 `Tutorials/vortexShed` 的 `cylinder` patch 做了 2 步单进程冒烟测试（`libs ("libAcoustics_fix.so")`）：FWH 对象正常加载、采样并输出 `OAP`，无崩溃。该测试只验证 `sampledPatch` 分支的运行路径；圆柱是凸体，新旧法向本来就一致，不能用来验证 `laptop_wall` 的符号。`laptop_wall` 的符号由 7.2 的几何检查和 9.2 的运行数据说明。
 
 ### 7.2 几何检查
 
@@ -679,11 +683,7 @@ impeller Σ n_heur dS  ≈ 1.5e-6 m²
 
 `openfoam_fwh_m4`（叶轮单独）同窗口叶轮之和 0.0595 Pa；all-wall 叶轮之和 0.0590 Pa，均值都是 0.0442。总 `p'` 0.194 vs 0.0595，约 +10.3 dB。
 
-修复后的预期：
-
-- wall 的 `Σ n dS` 从 0.0224 m² 变为 0；
-- wall OAP 明显下降，总 `p'` 接近叶轮单独的 0.06 Pa；
-- 5–20 kHz 壁面分量应显著下降；如果仍大，再查 cover 网格/CFL。
+修复后的实测见第 9 节。先给结论：wall 的均值/20–200 Hz 明显下降，但 5–20 kHz 基本不变；总 `p'` 仍约 0.186 Pa，并没有接近叶轮单独的 0.06 Pa。第 9 节给出共同窗口 0.03–0.0529 s 的完整对比。
 
 ### 7.4 复现步骤
 
@@ -695,10 +695,103 @@ impeller Σ n_heur dS  ≈ 1.5e-6 m²
 
 ---
 
-## 8. 结论与后续
+## 8. 阶段性结论
 
 1. **性能问题**的根因是 `tdPrimitive::dot` 的平方分配；当前分支已用一次分配、单次采样、观测时间网格解决，声学开销降到流动以下，内存从按面历史降到每麦克风一条信号。
-2. **`laptop_wall` 声压异常增大**的根因是 patch 法向的质心启发式：7 个 wall patch 合计是闭合面，但启发式只翻了 14.5% 的面，`Σ n dS = 0.0224 m²`，cover 的净面积矢量没有被翻。壁面压力载荷因此不闭合，wall OAP 0.197 Pa（叶轮 0.059 Pa），5–20 kHz 0.193 Pa（叶轮 0.014 Pa）。
-3. **修复**：`sampledPatch` 表面直接用 `-Sf/|Sf|`；叶轮和 wall 都回到正确外法向；非 patch 表面保留质心启发式。编译已通过，几何检查表明修复后 `Σ n dS = 0`。
-4. **仍待做**：壁面压力去均值、`tauMin` 按面/按 patch、cover 网格/CFL 检查、与 scFLOW 表面集对齐；当前 `_all` 运行需要停掉并用新库重跑。
-5. **不要用旧 `_all` 的 wall 数据下结论**：它是在错误法向下积分的，wall 的绝对值不可信；叶轮单独的 0.059 Pa 仍是可信的基线。
+2. **`laptop_wall` 的质心启发式确实错了**：7 个 wall patch 合计是闭合面，但启发式只翻了 14.5% 的面，`Σ n dS = 0.0224 m²`，cover 的净面积矢量没有被翻。修复为 `sampledPatch` 直接用 `-Sf/|Sf|` 后，几何上 `Σ n dS = 0`。
+3. **2026-11-17 实测：法向修复只解决了一部分问题**。wall 的直流/低频明显下降（均值 `-0.191 → -0.077`，20–200 Hz `0.0069 → 0.0017`），但 5–20 kHz 基本不变（`0.176 → 0.178`），总 `p'` 只从 `0.190` 降到 `0.186`，A 计权 `L_A` 反而从 `73.62` 变为 `74.00 dBA`。详见第 9 节。
+4. **剩余的高频 wall 项不是法向符号问题**：它是壁面压力载荷本身（cover 网格/CFL、近场、表面集、未解析的湍流/数值高频），需要拆分表面、远近场对比和 CFL/网格测试继续定位，详见 9.5。
+5. **仍待做**：壁面压力去均值、`tauMin` 按面/按 patch、cover 网格/CFL 检查、与 scFLOW 表面集对齐；旧 `_all` 的 wall 绝对值不能作为最终结论，但叶轮单独的 0.06 Pa 仍是可信基线。
+
+---
+
+## 9. 实测复核（2026-11-17）
+
+### 9.1 数据、窗口与方法
+
+| 项目 | 内容 |
+|---|---|
+| 旧库 | `/home/ubuntu/shared/openfoam_fwh_m4_all`（`_all`，wall 旧法向），停在 `0.05291 s` |
+| 新库 | `/home/ubuntu/shared/openfoam_fwh_m4_all_m1`（`_m1`，`-Sf`），运行到 `0.05997 s`；进程映射到新的 `libAcoustics.so` |
+| 叶轮单独基线 | `/home/ubuntu/shared/openfoam_fwh_m4` |
+| 共同稳态窗口 | `0.03–0.0529 s`，2291 点，`dt = 1e-5 s`，`df ≈ 43.7 Hz` |
+| 对象 | `FwhImpellers`（`fixedResponseDelay false`），避免 `tauMin` 全局耦合；`FwhImpellersFixedDelay` 趋势相同 |
+| 方法 | 去直流 + Hann 窗；窄带 SPL 为单根谱线级；1/3 倍频程由 PSD 带内积分；A 计权按 IEC 61672-1，1 kHz 归一化；`p_ref = 20 µPa` |
+
+> 新库运行确实用了修复后的代码：`/proc/<pid>/maps` 指向 `/home/ubuntu/OpenFOAM/ubuntu-v2412/platforms/linux64GccDPInt32Opt/lib/libAcoustics.so`（2026-11-16 23:54 构建），且叶轮 OAP 与旧库完全一致，只有 wall 发生变化。
+
+### 9.2 逐面 OAP
+
+共同窗口 `0.03–0.0529 s`，`FwhImpellers`，单位 Pa：
+
+| 量 | 旧库 `_all` | 新库 `_m1` | 变化 |
+|---|---:|---:|---:|
+| wall OAP 均值 | -0.1914 | **-0.0765** | 直流大幅减小 |
+| wall OAP 标准差 | 0.1868 | 0.1835 | 基本不变 |
+| wall OAP RMS | 0.2675 | **0.1989** | -2.6 dB |
+| wall 20–200 Hz | 0.0069 | **0.0017** | 约 -12 dB |
+| wall 5–20 kHz | 0.1764 | **0.1776** | +0.06 dB，基本不变 |
+| impeller1 OAP RMS | 0.0331 | 0.0331 | 0 |
+| impeller2 OAP RMS | 0.0320 | 0.0320 | 0 |
+| 总 `p'` 均值 | -0.1410 | **-0.0261** | 直流大幅减小 |
+| 总 `p'` 标准差 | 0.190 | 0.186 | -0.2 dB |
+| 总 `p'` RMS | 0.1897 | 0.1863 | **-0.16 dB** |
+| 总 `p'` 5–20 kHz | 0.1816 | 0.1709 | -0.5 dB |
+
+两个叶轮的 OAP 完全一致，说明流动和对比窗口有效；wall OAP RMS 的下降几乎全部来自均值和 20–200 Hz，5–20 kHz 的 AC 部分没有下降。
+
+### 9.3 总级、A 计权与全频带
+
+SPL 参考 20 µPa；`20–50 kHz` 到 Nyquist（`dt = 1e-5 s`，`fs = 100 kHz`）：
+
+| 频带 | 旧 OASPL | 新 OASPL | 叶轮单独 OASPL | 旧 L_A | 新 L_A | 叶轮单独 L_A |
+|---|---:|---:|---:|---:|---:|---:|
+| 20–20 kHz | 77.46 dB | 76.88 dB | 57.73 dB | 73.62 dBA | **74.00 dBA** | 56.83 dBA |
+| 20–50 kHz | 79.48 dB | 79.30 dB | 65.93 dB | 73.83 dBA | **74.15 dBA** | 57.19 dBA |
+| 仅 20–50 kHz | 75.19 dB | 75.60 dB | 65.22 dB | 60.66 dBA | 59.42 dBA | 46.17 dBA |
+
+- 未计权 OASPL 算到 50 kHz 会高约 2 dB；20–50 kHz 单独也有 75 dB 量级，叶轮单独的 20–50 kHz 也有 65.2 dB，说明这部分很可能是数值/未解析高频，不能当作可听声。
+- A 计权 `L_A` 对 20–50 kHz 不敏感（A 计权在 20 kHz 以上衰减很快），20–20k 与 20–50k 只差约 0.2 dB；因此 A 计权对比的结论是稳的。
+- 无论 20–20k 还是 20–50k，新库 `L_A` 都略高于旧库，wall 仍远大于叶轮（A 计权 5–20k 约 74 vs 56.5 dBA）。
+
+### 9.4 A 计权 1/3 倍频程关键点
+
+| fc / Hz | 旧库 / dBA | 新库 / dBA | 叶轮单独 / dBA |
+|---:|---:|---:|---:|
+| 500 | 41.4 | 25.7 | 21.7 |
+| 1000 | 45.5 | 28.8 | 34.4 |
+| 2000 | 47.9 | 44.5 | 44.4 |
+| 5000 | 47.2 | 50.5 | 31.2 |
+| 8000 | 70.0 | 71.7 | 55.9 |
+| 10000 | 56.9 | 59.5 | 37.6 |
+| 16000 | 67.1 | 65.2 | 36.0 |
+| 20000 | 60.7 | 58.9 | 41.0 |
+
+> 20–63 Hz 的部分 1/3 倍频程带在 22.9 ms 记录内没有 FFT 谱线（`df ≈ 43.7 Hz`），曲线在这些带断开；这是记录长度限制，不是零声压。
+
+### 9.5 结论：为什么只解决了一部分
+
+1. **法向修复对低频/直流有效**：wall 均值、20–200 Hz 和总 `p'` 均值都明显下降；这验证了几何分析（`Σ n dS` 从 0.0224 变为 0，闭合壁面的低频压力重新相消）。
+2. **对 5–20 kHz 基本无效**：wall 5–20k 从 0.1764 到 0.1776，总 `p'` 5–20k 从 0.1816 到 0.1709；A 计权 5–20k 从 73.57 到 73.98 dBA，反而略高。
+3. **原因是相干性不同**：低频压力在壁面上空间相干，法向反了就不能相消，所以修法向有效；5–20 kHz 的壁面压力空间不相干，积分本身是随机游走，翻转 85.5% 的符号不改变方差。剩余高频 wall 项是壁面压力载荷本身，不是法向 bug。
+4. **高频 wall 项的可能来源**：
+   - cover 面积 0.1454 m²（占 wall 73%），平均面尺度约 1.6 mm；case 约 0.27 mm、叶轮约 0.17 mm；cover 的边界层/高频压力没有解析；
+   - 当前 max Courant 约 6.4（`deltaT = 1e-5`，`adjustTimeStep no`），可能产生数值高频；
+   - 麦克风在 `(0.0062, 0.1, 0.2)`，离壁面很近，Farassat 1A 的 `1/r²` 近场项可能占主导，wall 的高频不一定是传播声；
+   - `laptop_wall` 包含 cover、case、fins、CPU/Cu block，自由场 1/r 积分没有遮挡/反射，内部壁面会被高估。
+5. **下一步**：
+   - 把 `laptop_wall` 拆成 `cover`、`case1/2`、`fins`、`CPU/Cu` 独立 surface，先定位 5–20 kHz 主要来自哪一块；
+   - 加 0.5 m/1 m 的远场 observer，确认 wall 是否按 `1/r` 衰减；如果衰减更快，说明当前高频是近场；
+   - 在副本上把 `deltaT` 降到 `2e-6` 左右（maxCo ≈ 1.3）或加密 cover，做短段复算，区分数值/网格与物理；
+   - 和 scFLOW 对齐 FW-H 表面集、observer 距离和网格；如果 scFLOW 不含 cover/内部壁面，增量小是口径不同。
+
+### 9.6 图与数据
+
+- [未计权对比图（FwhImpellers）](/home/ubuntu/shared/spl_compare/spl_compare_FwhImpellers.png)
+- [A 计权对比图（FwhImpellers）](/home/ubuntu/shared/spl_compare/spl_compare_FwhImpellers_A.png)
+- [A 计权对比图（FwhImpellersFixedDelay）](/home/ubuntu/shared/spl_compare/spl_compare_FwhImpellersFixedDelay_A.png)
+- [对比数据与说明](/home/ubuntu/shared/spl_compare/spl_compare_summary.md)
+- [绘图脚本](/home/ubuntu/shared/spl_compare/make_spl_compare.py)
+- 各图的 `_1_3oct.csv` / `_narrowband.csv` 为对应曲线数据。
+
+绘图窗口为 `0.03–0.0529 s`，Hann 窗，`df ≈ 43.7 Hz`；窄带图横轴和总级默认只到 20 kHz，原始数据到 50 kHz，第 9.3 节给出了 20–50 kHz 的全频带结果。
