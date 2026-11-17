@@ -1124,7 +1124,7 @@ df ≤ 1–1.5 Hz  →  T ≥ 0.7–1 s
 - 已清除：`processor*`、时间目录、`acousticData/`、`postProcessing/`、`log.*`、`perf.data`、压缩包
 - 大小：约 781 MB
 - `_all_m1` 仍在运行；`_all_m3` 独立，不影响它
-- `system/fvSchemes.A0`、`fvSolution.A0`、`controlDict.A0` 保存了修改前的 A0 字典，便于回退/A-B
+- `system/fvSchemes.A0`、`fvSolution.A0`、`controlDict.A0` 保存了修改前的 A0 字典；`fvSolution.A3`、`controlDict.A3` 保存了 A3（dt 2e-6、PIMPLE 2/3/1）字典，便于回退/A-B
 
 `checkMesh`（完整日志 `/tmp/checkMesh_m3.log`）：
 
@@ -1192,13 +1192,16 @@ Failed 1 mesh checks
 | A0 | 1e-5 / maxCo 4.5–6.4 | Euler | upwind | 当前 | 基线 |
 | A1 | 2e-6 / maxCo ≈1 | Euler | upwind | 当前 | 判断 CFL/时间主导 |
 | A2 | 2e-6 | backward | limitedLinearV 1 | 当前 | 时间+空间升阶 |
-| **A3** | **2e-6** | **backward** | **limitedLinearV 1** | **nOuter2/nCorr3/nNonOrth1** | **本次应用：时间+空间+压力耦合** |
+| A3（备份） | 2e-6 | backward | limitedLinearV 1 | nOuter2/nCorr3/nNonOrth1 | 时间+空间+压力耦合；`*.A3` |
+| **A3.1（当前）** | **5e-6** | **backward** | **limitedLinearV 1** | **nOuter1/nCorr2/nNonOrth1** | **降低单步成本，先跑通** |
 | A4 | 2e-6 | backward | limitedLinearV 1 | corrected + nNonOrth2 | 压力非正交 |
 | A5 | 2e-6 | backward/LES | limitedLinearV 1 | 修正 + 网格/AMI | 物理高频 |
 
-A3 不包含 `corrected` laplacian/snGrad，也不包含网格/AMI 修改；它只验证“小 dt + BDF2 + 二阶有界对流 + 更紧的 PIMPLE/压力容差”。
+A3/A3.1 都不包含 `corrected` laplacian/snGrad，也不包含网格/AMI 修改；它们只验证“小 dt + BDF2 + 二阶有界对流 + 更紧的 PIMPLE/压力容差”。
 
-### 10.5 已应用到 `_all_m3` 的 A3 修改
+### 10.5 已应用到 `_all_m3` 的 A3 / A3.1 修改
+
+> 2026-11-18 00:42 按用户要求，把 `_all_m3` 从 A3（`dt=2e-6`、PIMPLE `2/3/1`）调整为 **A3.1**（`dt=5e-6`、PIMPLE `1/2/1`）。A3 原字典已备份为 `fvSolution.A3`、`controlDict.A3`；`fvSchemes` 不变。
 
 **`system/fvSchemes`**
 
@@ -1222,10 +1225,10 @@ divSchemes
 **`system/controlDict`**
 
 ```foam
-deltaT          2e-06;
+deltaT          5e-06;
 ```
 
-`adjustTimeStep no`、`maxCo 0.6`、`maxDeltaT 0.0002` 未改（`maxCo` 在 `adjustTimeStep no` 下不生效）；`endTime 0.1` 未改。
+`adjustTimeStep no`、`maxCo 0.6`、`maxDeltaT 0.0002` 未改（`maxCo` 在 `adjustTimeStep no` 下不生效）；`endTime 0.1` 未改。A3 的 `deltaT=2e-6` 在 `controlDict.A3` 中。
 
 **`system/fvSolution`**
 
@@ -1234,8 +1237,8 @@ PIMPLE
 {
     momentumPredictor yes;
     correctPhi        yes;
-    nOuterCorrectors  2;
-    nCorrectors       3;
+    nOuterCorrectors  1;
+    nCorrectors       2;
     nNonOrthogonalCorrectors 1;
 }
 
@@ -1271,32 +1274,36 @@ UFinal
 }
 ```
 
-`relaxationFactors` 暂时保持 `"U.*" 1`；如果 `nOuterCorrectors 2` 出现振荡，再加 `U 0.9`、`p 0.9`。
+`relaxationFactors` 暂时保持 `"U.*" 1`。A3.1 的 `nOuterCorrectors 1` 回到 PISO 式；如果出现振荡，优先把 dt 降回 `2e-6`，而不是先加 p/U 松弛。
 
-A3 与 A0 的完整 diff 可用：
+A3 / A3.1 与 A0 的完整 diff 可用：
 
 ```bash
 cd /home/ubuntu/shared/openfoam_fwh_m4_all_m3/system
 diff -u fvSchemes.A0 fvSchemes
 diff -u fvSolution.A0 fvSolution
 diff -u controlDict.A0 controlDict
+diff -u fvSolution.A3 fvSolution
+diff -u controlDict.A3 controlDict
 ```
 
 ### 10.6 预期、代价与验证
 
 **预期：**
 
-- dt 从 1e-5 降到 2e-6，maxCo 约 1–1.3，时间/AMI 误差应下降；如果高频 wall 明显下降，说明之前主要是时间/CFL 数值噪声。
+- A3.1（当前）：dt 从 1e-5 降到 5e-6，预计稳态 maxCo 约 3.2、启动段约 5；比 A3 的 dt 2e-6（maxCo 约 1.3）时间精度低，但成本约减半。如果 5–20 kHz wall 仍不降，再把 dt 降回 2e-6 做 A3。
 - `backward` 比 Euler 更准、对高频略更阻尼；`limitedLinearV 1` 比 upwind 更准、数值耗散更小。
 - 但升阶可能让 5–20 kHz 的已解析分量增加；**不要只用 wall OAP 是否下降判断成功**，还要看速度/压力谱、均值、质量流量、残差和网格/时间收敛性。
-- 若 A3 的 wall 5–20k 仍约 0.14 Pa（当前 0.145 Pa），说明高频不是由一阶格式主导，需进入 A4/A5（`corrected`、网格/AMI、LES/DES）。
-- 当前 target（§9.8）wall 5–20k ≤0.02 Pa，需要约 17 dB 下降；单靠 A3 不太可能达到，A3 是“排除格式/CFL 因素”的必要步骤。
+- 若 A3.1 的 wall 5–20k 仍约 0.14 Pa（当前 0.145 Pa），说明高频不是由一阶格式主导，需进入 A4/A5（`corrected`、网格/AMI、LES/DES）。
+- 当前 target（§9.8）wall 5–20k ≤0.02 Pa，需要约 17 dB 下降；单靠 A3/A3.1 不太可能达到，它们是“排除格式/CFL 因素”的必要步骤。
 
 **代价：**
 
-- dt 2e-6、`endTime 0.1` = 50,000 步；按约 13.7 s/步，约 **7.9 天**。
-- 从 0 到 0.03 s（15,000 步）约 **2.4 天**，才能进入较稳定的高频统计窗口；从 0 到 0.05 s 约 **4 天**。
-- 短段稳定性测试可先跑 100–500 步（约 0.0002–0.001 s），但 wall 高频统计不足以定量。
+- **A3.1（当前）**：dt 5e-6、`endTime 0.1` = 20,000 步；`PIMPLE 1/2/1` 估计约 **14–18 s/步**，约 **3.2–4.2 天**。
+  - 到 0.03 s（6,000 步）约 **1.0–1.3 天**；
+  - 到 0.05 s（10,000 步）约 **1.6–2.1 天**。
+- **A3（备份）**：dt 2e-6、`endTime 0.1` = 50,000 步；`PIMPLE 2/3/1` 约 **17–25 s/步**，约 **10–15 天**。
+- 短段稳定性测试可先跑 100–500 步；A3.1 下约 0.0005–0.0025 s，但 wall 高频统计不足以定量。
 
 **运行：**
 
