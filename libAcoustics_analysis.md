@@ -3,15 +3,16 @@
 > 分支：`v2412`（`origin/v2412`）
 > 基准：最初 `v2412` 为 `04f8a7a`；本文写作时的分支头为 `72eea13`，本次在其上增加 patch 表面法向修复。
 > 源码：`/home/ubuntu/programs/libAcoustics`
-> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合；2026-11-18 补充格式分析/A3）
+> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合；2026-11-18 补充格式分析/A3；2026-11-18 补充叶轮 FW-H 数据的 FFT/A 计权/PSD 后处理）
 
-本文把五类内容分开：
+本文把六类内容分开：
 
 1. **性能分析**：最初 `v2412` 在 Windows 8 rank 算例上的平方分配、并行和内存问题；
 2. **性能与正确性修改**：当前分支已经合入的导数分配、采样、Farassat 观测网格、面速度、多面求和等；
 3. **patch 法向修复**：`laptop_wall` 的 7 个 patch 是闭合壁面，原质心启发式只翻转了 14.5% 的面，导致壁面压力载荷的符号和相消关系错误。本文给出源码路径、几何验证、修复方法和与 Cradle scFLOW 的差异；
 4. **2026-11-17 实测复核与信息融合**：新库 `_m1` 与旧库 `_all` 的逐面 OAP、时域漂移、SPL、1/3 倍频程、A 计权、20–50 kHz 全频带、相关系数和能量预算对比。结论：法向修复解决了直流/低频（wall 20–200 Hz −20 dB），但 5–20 kHz 的壁面宽带几乎不变（+0.05 dB），总级仍比叶轮单独高约 19 dB。第 9 节把这些实测与 §5 的几何/源码分析逐项对应。
 5. **2026-11-18 格式分析/A3**：确认 `_all_m1` 的时间 Euler、U 对流 upwind 为一阶，实际 maxCo 4.5–6.4；复制并清理 `_all_m3`，分析提高时间/空间阶次对高频数值噪声的作用，并把 A3（`backward` + `limitedLinearV 1` + `dt=2e-6` + 更紧 PIMPLE/压力容差）应用到 `_all_m3`，见第 10 节。
+6. **2026-11-18 叶轮 FW-H 后处理**：对叶轮单独算例的 `acousticData/FwhImpellersFixedDelay-time.dat` 做 FFT、1/3 倍频程、A 计权和 PSD 修正，给出稳态窗口定义、OASPL 与 L_A 的差异以及可复现算法，见第 11 节。
 
 > 注意：性能节的绝对时间来自最初的 Windows 8 rank 运行；法向节的 OAP 数据来自 Linux 48 rank 的 `openfoam_fwh_m4_all`（旧库）和 `openfoam_fwh_m4_all_m1`（新库）运行；第 9 节另用 `openfoam_fwh_m4`（叶轮单独）作基线。几套数据的网格、进程数和时间步不同，**不要直接混用绝对时间**。第 9 节的比较统一用 `0.03–0.0529 s` 公共窗口；旧数据已停止在 `0.05291 s`，新数据仍在运行。
 
@@ -30,6 +31,7 @@
 - [8. 阶段性结论](#8-阶段性结论)
 - [9. 实测复核与信息融合（2026-11-17）](#9-实测复核与信息融合2026-11-17)
 - [10. 时间/空间格式与高频数值噪声（2026-11-18）](#10-时间空间格式与高频数值噪声2026-11-18)
+- [11. 叶轮 FW-H 后处理（2026-11-18）](#11-叶轮-fw-h-后处理2026-11-18)
 
 ---
 
@@ -1326,3 +1328,255 @@ A3 使用新的 `libAcoustics.so`（2026-11-16 23:54），`fwhControl` 仍是 2 
 - A3 稳定后，再做 A4：`laplacian/snGrad` 改 `corrected` + `nNonOrthogonalCorrectors 2`；当前 skewness 5.58，需先确认不发散。
 - 如果 A1–A4 的 wall 5–20k 都不降，优先修 1042 个偏斜面、加密 cover、检查 AMI 权重；`laminar` 下 5–20k 可能不是可解析物理量，必要时改用 LES/DES。
 - 任何 A/B 都应固定分解、初始场和统计窗口；否则逐面 OAP 会有 0.1–0.2 dB 的“假差异”（见 §9.10 与叶轮单独对照）。
+
+---
+
+## 11. 叶轮 FW-H 后处理（2026-11-18）
+
+本节记录**叶轮单独算例** `openfoam_fwh_m4` 的 FW-H 声压数据后处理：FFT、1/3 倍频程、A 计权和 PSD 修正。对象是单个麦克风的 `mic_pFluct`，不涉及 §5–§10 的 `laptop_wall` 法向、整机对比或 A3 格式测试；两者不要混用绝对级。
+
+### 11.1 数据、分析窗口与结果
+
+数据文件：
+
+```text
+/home/ubuntu/shared/openfoam_fwh_m4/acousticData/FwhImpellersFixedDelay-time.dat
+```
+
+两列：`Time [s]  mic_pFluct [Pa]`。当前文件已写到 `endTime = 0.1 s`：
+
+| 项目 | 值 |
+|---|---|
+| 采样点数 N | 10000 |
+| 时间范围 | 1e-5–0.1 s |
+| 采样率 fs | 100 kHz |
+| 整段频率分辨率 df | 10 Hz |
+| Nyquist | 50 kHz |
+| 首个非零样本 | 0.01002 s |
+| 起始脉冲峰值 | 57.18 Pa @ 0.01008 s |
+
+**稳态窗口**取 `t ≥ 0.01202 s` 到记录末端：首个非零样本后跳过 2 ms，避开 0.01008 s 的起始脉冲。该窗口是工程意义上的“后瞬态段”，不是严格统计平稳信号。
+
+| 稳态窗口 | 值 |
+|---|---|
+| 时间范围 | 0.01202–0.10000 s |
+| 采样点数 N | 8799 |
+| 时长 T | 0.08798 s |
+| df | 11.36 Hz |
+| 脉动 RMS（去直流） | 0.04155 Pa |
+| 峰值 | 0.277 Pa |
+
+结果（当前完整数据）：
+
+| 分析段 | OASPL 20 Hz–20 kHz | L_A 20 Hz–20 kHz | OASPL 全频带 | L_A 全频带 |
+|---|---:|---:|---:|---:|
+| 整段记录（含起始脉冲） | 74.24 dB | 70.98 dBA | 92.68 dB | 74.75 dBA |
+| **稳态段（推荐）** | **59.41 dB** | **57.27 dBA** | **66.35 dB** | **57.59 dBA** |
+
+稳态段的 1/3 倍频程在 **8 kHz** 附近有一个显著窄带峰：带级约 **57.45 dB**，A 计权后约 **56.31 dBA**，基本决定总级；PSD 峰值频率约 **7.3 kHz**。全频带 OASPL 比 20 Hz–20 kHz 高约 6.9 dB，是因为 **20–50 kHz 仍有约 65.3 dB** 的能量；A 计权把它压到约 46.1 dBA，所以全频带 L_A 只比 20–20 kHz 高 0.32 dB。
+
+> 整段记录总级由 57.2 Pa 起始脉冲主导，不能代表叶轮稳态噪声；下文的总级默认指 **t ≥ 0.01202 s、20 Hz–20 kHz**。
+
+### 11.2 OASPL 与 L_A 的定义和差异
+
+两者都是“总声压级”，区别只在**频率计权**。
+
+**OASPL（未计权）**：
+
+```text
+OASPL = 20 lg(p_rms / p_ref) = 10 lg( Σ_k p_k² / p_ref² )
+p_ref = 20 μPa
+```
+
+把 20 Hz–20 kHz 内所有频率分量的声压能量直接相加，反映物理声压能量，单位 dB。
+
+**L_A（A 计权总级）**：
+
+```text
+L_A = 10 lg[ Σ_k 10^((L_k + A(f_k)) / 10) ]
+```
+
+先对每个频率成分加 A 计权修正 `A(f_k)`，再按能量求和，单位 dBA。它模拟人耳对低频和极高频不敏感的特性，不能与未计权 OASPL 直接混用。
+
+A 计权的关键值：
+
+| 频率 | A(f) / dB |
+|---:|---:|
+| 20 Hz | −50.4 |
+| 100 Hz | −19.1 |
+| 1 kHz | 0.0 |
+| 8 kHz | −1.15 |
+| 20 kHz | −9.35 |
+
+本稳态段的能量分布（PSD 积分）：
+
+| 频段 | OASPL / dB | L_A / dBA |
+|---|---:|---:|
+| 20–500 Hz | 53.51 | 36.87 |
+| 500–2000 Hz | 43.35 | 43.72 |
+| 2–10 kHz | 57.61 | 56.89 |
+| 10–20 kHz | 47.08 | 42.12 |
+| 20–50 kHz | 65.30 | 46.07 |
+| **20 Hz–20 kHz** | **59.41** | **57.27** |
+
+所以本数据中：
+
+- 20 Hz–20 kHz：OASPL 59.41 dB，L_A 57.27 dBA，相差 **2.14 dB**；8 kHz 峰在 A 计权下只衰减 1.15 dB，因此总级下降不多。
+- 全频带：OASPL 66.35 dB，L_A 57.59 dBA，相差 **8.76 dB**；20–50 kHz 的强能量被 A 计权大幅压低。
+
+**结论：评价人耳噪声/标准限值用 L_A（dBA）；分析物理声压能量或与 FW-H 面载荷对应时用 OASPL（dB）。**
+
+### 11.3 A 计权算法（IEC 61672-1）
+
+采用 IEC 61672-1 的解析式，1 kHz 归一化为 0 dB：
+
+```text
+R_A(f) = 12194² f⁴ /
+         [ (f² + 20.6²)
+           · sqrt((f² + 107.7²)(f² + 737.9²))
+           · (f² + 12194²) ]
+
+A(f) = 20 lg R_A(f) + 2.00     [dB]
+```
+
+`+2.00 dB` 使 `A(1000 Hz) = 0`。`f = 0` 时 `R_A = 0`，取 `A = −∞`（该 bin 不参与 A 计权求和）。
+
+实现（`fft_aweight_analysis.py` 的 `a_weight_db`）：
+
+```python
+def a_weight_db(f):
+    f2 = f * f
+    num = 12194.0**2 * f2 * f2
+    den = ((f2 + 20.6**2)
+           * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2))
+           * (f2 + 12194.0**2))
+    out = np.full(f.shape, -np.inf)
+    ok = f > 0
+    out[ok] = 20.0 * np.log10(num[ok] / den[ok]) + 2.0
+    return out
+```
+
+用法：逐谱线 `L_A,k = L_k + A(f_k)`，再按 `10 lg Σ 10^(L_A,k/10)` 求和。这与在时域对信号做 A 计权滤波后再求 RMS 等价（忽略滤波瞬态和数值误差）。
+
+**注意**：A 计权的标准评价频带是 **20 Hz–20 kHz**。本文的“全频带 L_A”只是把解析式外推到 50 kHz 的参考值，不应作为标准评级；标准值取 20 Hz–20 kHz 那一列。
+
+### 11.4 PSD 修正算法
+
+#### 11.4.1 为什么要做 PSD 修正
+
+直接画“每根谱线的 SPL”时，谱线带宽是 `df = fs/N`。同一个宽带信号，N 越大、df 越小，每根谱线的级越低；换个采样点数或补零，曲线就会整体平移，不能直接比较。PSD 把结果归一化成**单位带宽的功率密度**（Pa²/Hz），再做频带积分，因此带级和总级不随 N、df 改变。
+
+#### 11.4.2 单边 PSD
+
+对去直流后的信号 `x_n` 加窗 `w_n`：
+
+```text
+X_k = Σ_{n=0}^{N-1} w_n x_n e^(−i2πkn/N)
+```
+
+单边 PSD：
+
+```text
+S_k = 2 |X_k|² / (fs · Σ_n w_n²)     [Pa²/Hz]      (1 ≤ k < N/2)
+
+S_0     = |X_0|²     / (fs · Σ w_n²)                (DC 不乘 2)
+S_{N/2} = |X_{N/2}|² / (fs · Σ w_n²)                (Nyquist 不乘 2，N 为偶数时)
+```
+
+矩形窗 `w_n = 1`、`Σ w_n² = N` 时退化为：
+
+```text
+S_k = 2 |X_k|² / (fs · N)
+```
+
+它与幅值谱 `A_k = 2|X_k|/N` 的关系（内部 bin）是：
+
+```text
+S_k = A_k² / (2 · df)
+```
+
+实现：
+
+```python
+sw2 = np.sum(w * w)
+psd = 2.0 * np.abs(X)**2 / (fs * sw2)
+psd[0] *= 0.5
+if n % 2 == 0:
+    psd[-1] *= 0.5
+```
+
+#### 11.4.3 频带级、总级和 A 计权总级
+
+PSD 积分给均方值，再换算为级：
+
+```text
+E_band = Σ_{f_k ∈ band} S_k · df
+
+SPL_band = 10 lg(E_band / p_ref²)
+
+E_total = Σ_k S_k · df
+
+OASPL = 10 lg(E_total / p_ref²)
+
+E_A = Σ_k S_k · df · 10^(A(f_k)/10)
+
+L_A = 10 lg(E_A / p_ref²)
+```
+
+Parseval 校验：
+
+```text
+Σ_k S_k · df = (1/N) Σ_n x_n²
+```
+
+本数据的谱积分 RMS 与时域 RMS 差 **0.0 dB**，说明 PSD 归一化和窗功率修正一致。
+
+#### 11.4.4 使用要点
+
+- **宽带谱级**用 PSD（dB/Hz）比较，不随 N/df 平移。
+- **离散单频**的单根谱线 PSD 峰值仍与 `df` 有关（`S_peak ∝ 1/df`）；比较单频时应比较**频带积分后的带级**，而不是单 bin 峰值。
+- 矩形窗的 PSD 不需要额外 ENBW 修正；若换 Hann 等窗，用 `Σw²` 做功率归一化即可，但幅值谱的相干增益要用 `Σw` 单独处理。
+- 记录前部的零样本会拉低整段平均功率；补零不能增加物理记录长度，也不能改善低频分辨率。绝对级应取实际信号窗口（本文取稳态段）。
+- 本数据 `df = 11.36 Hz`，20 Hz 的 1/3 倍频程带宽只有约 4.6 Hz，带内不足 1 个 bin；**20–63 Hz 带级不可靠**，要定量需要 0.5–1 s 的记录（与 §9.10.5 的结论一致）。
+
+### 11.5 输出文件与复现
+
+分析脚本：
+
+```text
+/home/ubuntu/shared/openfoam_fwh_m4/acousticData/fft_aweight_analysis.py
+```
+
+依赖 `numpy` 和 `Pillow`。默认分析整段，`--plot-full` 让谱图显示整段；`--t-start` 和 `--suffix` 可另存其他起点/文件前缀：
+
+```bash
+cd /home/ubuntu/shared/openfoam_fwh_m4/acousticData
+python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat --plot-full
+
+# 例：从 0.01 s 起算，另存为 *_from0.01s_*
+python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
+    --t-start=0.01 --suffix=_from0.01s
+```
+
+主要输出：
+
+| 文件 | 内容 |
+|---|---|
+| `FwhImpellersFixedDelay-time_fft_spectrum.csv` | `f, amplitude, SPL, A_weight, SPL_A, PSD, PSD_level, PSD_A_level` |
+| `FwhImpellersFixedDelay-time_1_3oct.csv` | 整段 + 稳态 1/3 倍频程带级 |
+| `FwhImpellersFixedDelay-time_spectrum.png` | SPL 谱（对数频率轴）+ 时域波形 |
+| `FwhImpellersFixedDelay-time_psd.png` | 整段 PSD（dB/Hz） |
+| `FwhImpellersFixedDelay-time_steady_time.csv` | 稳态时域：`Time_s, mic_pFluct_Pa, p_ac_Pa` |
+| `FwhImpellersFixedDelay-time_steady_fft_spectrum.csv` | 稳态窄带谱（含 PSD 三列） |
+| `FwhImpellersFixedDelay-time_steady_1_3oct.csv` | 稳态 1/3 倍频程带级 |
+| `FwhImpellersFixedDelay-time_steady_spectrum.png` | 稳态 SPL 谱 + 时域波形 |
+| `FwhImpellersFixedDelay-time_steady_psd.png` | 稳态 PSD（dB/Hz） |
+| `FwhImpellersFixedDelay-time_steady_summary.md` | 稳态窗口、RMS、OASPL、L_A、PSD 峰值频率 |
+
+### 11.6 本节结论
+
+1. 叶轮单独算例的稳态窗口为 **0.01202–0.1 s**（跳过 0.01008 s 的 57.2 Pa 起始脉冲）；整段总级不能代表稳态噪声。
+2. 稳态段 **OASPL(20 Hz–20 kHz) = 59.41 dB，L_A = 57.27 dBA**；全频带参考值 66.35 dB / 57.59 dBA。
+3. 8 kHz 窄带峰是稳态谱的主分量；20–50 kHz 有强能量，但 A 计权后对总级贡献有限。
+4. A 计权按 IEC 61672-1 解析式逐谱线修正；PSD 按 `2|X|²/(fs Σw²)` 归一化后用 `Σ S df` 求带级/总级，因而与采样点数 N、频率分辨率 df 无关（宽带部分）。
+5. 低频 20–63 Hz 受当前 0.088 s 记录长度限制，带级不可用于定量结论；需要更长记录。
