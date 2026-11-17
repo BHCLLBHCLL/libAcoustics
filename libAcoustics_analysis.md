@@ -3,14 +3,15 @@
 > 分支：`v2412`（`origin/v2412`）
 > 基准：最初 `v2412` 为 `04f8a7a`；本文写作时的分支头为 `72eea13`，本次在其上增加 patch 表面法向修复。
 > 源码：`/home/ubuntu/programs/libAcoustics`
-> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合）
+> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合；2026-11-18 补充格式分析/A3）
 
-本文把四类内容分开：
+本文把五类内容分开：
 
 1. **性能分析**：最初 `v2412` 在 Windows 8 rank 算例上的平方分配、并行和内存问题；
 2. **性能与正确性修改**：当前分支已经合入的导数分配、采样、Farassat 观测网格、面速度、多面求和等；
 3. **patch 法向修复**：`laptop_wall` 的 7 个 patch 是闭合壁面，原质心启发式只翻转了 14.5% 的面，导致壁面压力载荷的符号和相消关系错误。本文给出源码路径、几何验证、修复方法和与 Cradle scFLOW 的差异；
 4. **2026-11-17 实测复核与信息融合**：新库 `_m1` 与旧库 `_all` 的逐面 OAP、时域漂移、SPL、1/3 倍频程、A 计权、20–50 kHz 全频带、相关系数和能量预算对比。结论：法向修复解决了直流/低频（wall 20–200 Hz −20 dB），但 5–20 kHz 的壁面宽带几乎不变（+0.05 dB），总级仍比叶轮单独高约 19 dB。第 9 节把这些实测与 §5 的几何/源码分析逐项对应。
+5. **2026-11-18 格式分析/A3**：确认 `_all_m1` 的时间 Euler、U 对流 upwind 为一阶，实际 maxCo 4.5–6.4；复制并清理 `_all_m3`，分析提高时间/空间阶次对高频数值噪声的作用，并把 A3（`backward` + `limitedLinearV 1` + `dt=2e-6` + 更紧 PIMPLE/压力容差）应用到 `_all_m3`，见第 10 节。
 
 > 注意：性能节的绝对时间来自最初的 Windows 8 rank 运行；法向节的 OAP 数据来自 Linux 48 rank 的 `openfoam_fwh_m4_all`（旧库）和 `openfoam_fwh_m4_all_m1`（新库）运行；第 9 节另用 `openfoam_fwh_m4`（叶轮单独）作基线。几套数据的网格、进程数和时间步不同，**不要直接混用绝对时间**。第 9 节的比较统一用 `0.03–0.0529 s` 公共窗口；旧数据已停止在 `0.05291 s`，新数据仍在运行。
 
@@ -28,6 +29,7 @@
 - [7. 验证与复现](#7-验证与复现)
 - [8. 阶段性结论](#8-阶段性结论)
 - [9. 实测复核与信息融合（2026-11-17）](#9-实测复核与信息融合2026-11-17)
+- [10. 时间/空间格式与高频数值噪声（2026-11-18）](#10-时间空间格式与高频数值噪声2026-11-18)
 
 ---
 
@@ -1108,3 +1110,212 @@ df ≤ 1–1.5 Hz  →  T ≥ 0.7–1 s
 5. **5–20 kHz 的窄带峰**：如果只关心宽带 SPL，当前 `df` 够；如果要分辨窄带音调，至少用 0.0625 s 全记录（`df ≈ 16 Hz`），并确认峰间距 >16 Hz。
 
 > 总结：**5–20 kHz 的数据量够；20–20 kHz 总级够；20–100 Hz 的 1/3 倍频程/20 Hz 窄带不够。** 当前 5–20 kHz 的结论不是被数据量限制，而是壁面高频本身（cover 网格/CFL、近场、表面集）需要按 §9.8 继续排查。
+
+---
+
+## 10. 时间/空间格式与高频数值噪声（2026-11-18）
+
+### 10.1 `_all_m3` 的复制与清理
+
+从 `_all_m1` 复制基础算例（不复制历史）：
+
+- 路径：`/home/ubuntu/shared/openfoam_fwh_m4_all_m3`
+- 内容：`0/`、`constant/`、`system/`、`Allrun`、`Allclean`
+- 已清除：`processor*`、时间目录、`acousticData/`、`postProcessing/`、`log.*`、`perf.data`、压缩包
+- 大小：约 781 MB
+- `_all_m1` 仍在运行；`_all_m3` 独立，不影响它
+- `system/fvSchemes.A0`、`fvSolution.A0`、`controlDict.A0` 保存了修改前的 A0 字典，便于回退/A-B
+
+`checkMesh`（完整日志 `/tmp/checkMesh_m3.log`）：
+
+```text
+Mesh non-orthogonality Max: 58.1288  average: 7.4321
+Max skewness = 5.5799, 1042 highly skew faces detected
+Failed 1 mesh checks
+```
+
+`checkMesh` 写入的 `constant/polyMesh/sets/` 已删除，保持算例干净。1042 个高偏斜面本身就可能产生局部高频压力噪声，单靠升阶不一定能压住。
+
+### 10.2 当前 A0 格式
+
+| 项 | A0 / `_all_m1` | 阶次/说明 |
+|---|---|---|
+| 时间 | `ddtSchemes default Euler` | **一阶** |
+| U 对流 | `div(phi,U) Gauss upwind` | **一阶**，数值耗散大 |
+| 粘性项 | `div((nuEff*dev2(T(grad(U))))) Gauss linear` | 二阶 |
+| 压力通量 | `div(meshPhi,p) Gauss linear` | 二阶 |
+| 梯度 | `gradSchemes default Gauss linear` | 二阶 |
+| 拉普拉斯 | `Gauss linear limited 0.5` | 二阶 + 限幅；偏斜/非正交处降阶 |
+| 面法向梯度 | `snGradSchemes limited 0.5` | 限幅；偏斜处降阶 |
+| 插值 | `interpolationSchemes linear` | 二阶 |
+| 湍流 | `simulationType laminar` | 无湍流模型 |
+| 时间步 | `deltaT 1e-5`，`adjustTimeStep no` | `maxCo 0.6` 实际未生效 |
+| 实际 CFL | 日志 max Courant **4.5–6.4** | 时间误差很大 |
+| PIMPLE | `nOuter 1`、`nCorrectors 2`、`nNonOrth 0` | 压力-速度耦合偏松 |
+| 压力容差 | `p 1e-6/rel 0.1`、`pFinal 1e-6/0.01`、`pcorr 1e-2` | 偏松 |
+
+准确说法是：**时间 Euler 一阶、U 对流 upwind 一阶；laplacian/snGrad 是 limited 0.5 的限幅低阶；grad/interpolation 是 linear 二阶。** 当前 CFL 4.5–6.4 下，时间/AMI/压力耦合误差很可能比空间格式阶次更主导。
+
+### 10.3 提高阶次能否抑制高频数值噪声？
+
+**结论：能提高速度和压力脉动精度，但不能简单等同于“抑制高频噪声”；盲目升阶可能让高频分量更明显。**
+
+1. **一阶 upwind/Euler 是耗散的**，会压制小尺度/高频脉动。
+   升到二阶后数值耗散减小，**已解析的高频分量通常会增多**，而不是减少：
+   - 如果高频是“数值耗散掩盖下的物理脉动”，升阶会还原它们；
+   - 如果高频是“数值色散/偏斜面/AMI 误差”，升阶可能让它更明显，尤其纯 `linear` 会产生过冲。
+
+2. **当前 CFL > 4**，时间推进本身不在精度区间。
+   只把空间改成二阶而不减小 `deltaT`，时间误差仍是主导；二阶时间格式在 CFL>1 时也可能不稳定或产生振荡。
+
+3. **高频 wall 项的来源**更可能是：
+   - 移动网格/AMI 插值误差（AMI 权重 min 约 0.49）；
+   - 1042 个高偏斜面、cover 粗网格（平均面尺度约 1.6 mm）；
+   - `nNonOrthogonalCorrectors 0` + 偏松的压力容差；
+   - `laminar` 模型下 5–20 kHz 的壁面压力本来就不是解析湍流，可能是未解析/数值高频。
+
+4. **时间格式**：
+   - `backward`（BDF2）：二阶，高频阻尼比 Crank–Nicolson 大，**更有利于压噪声**，但也会阻尼物理脉动；
+   - `CrankNicolson 0.9`：二阶、阻尼小，**保真度高但可能保留/放大高频**。
+
+5. **空间格式**：
+   - `limitedLinearV 1` 或 `linearUpwind grad(U)` 是二阶且有界/较稳；
+   - 纯 `Gauss linear` 对 U 容易产生色散振荡，不建议直接替换 upwind；
+   - `laplacian/snGrad` 从 `limited 0.5` 改 `corrected` 能提高压力精度，但当前 max skewness 5.58，`corrected` 可能不稳定；应先加 `nNonOrthogonalCorrectors` 并修偏斜面。
+
+> 升阶是“提精度”，不是“降噪”。降噪更依赖减小 dt/CFL、压力耦合、AMI/偏斜面和网格；升阶后高频反而可能更丰富。
+
+### 10.4 A0–A5 测试矩阵
+
+| 算例 | dt/CFL | 时间 | U 对流 | 压力修正 | 目的 |
+|---|---|---|---|---|---|
+| A0 | 1e-5 / maxCo 4.5–6.4 | Euler | upwind | 当前 | 基线 |
+| A1 | 2e-6 / maxCo ≈1 | Euler | upwind | 当前 | 判断 CFL/时间主导 |
+| A2 | 2e-6 | backward | limitedLinearV 1 | 当前 | 时间+空间升阶 |
+| **A3** | **2e-6** | **backward** | **limitedLinearV 1** | **nOuter2/nCorr3/nNonOrth1** | **本次应用：时间+空间+压力耦合** |
+| A4 | 2e-6 | backward | limitedLinearV 1 | corrected + nNonOrth2 | 压力非正交 |
+| A5 | 2e-6 | backward/LES | limitedLinearV 1 | 修正 + 网格/AMI | 物理高频 |
+
+A3 不包含 `corrected` laplacian/snGrad，也不包含网格/AMI 修改；它只验证“小 dt + BDF2 + 二阶有界对流 + 更紧的 PIMPLE/压力容差”。
+
+### 10.5 已应用到 `_all_m3` 的 A3 修改
+
+**`system/fvSchemes`**
+
+```foam
+ddtSchemes
+{
+    default         backward;
+}
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      Gauss limitedLinearV 1;
+    div((nuEff*dev2(T(grad(U))))) Gauss linear;
+    div(meshPhi,p)  Gauss linear;
+}
+```
+
+`gradSchemes`、`interpolationSchemes` 保持 `linear`；`laplacianSchemes` 保持 `Gauss linear limited 0.5`；`snGradSchemes` 保持 `limited 0.5`。
+
+**`system/controlDict`**
+
+```foam
+deltaT          2e-06;
+```
+
+`adjustTimeStep no`、`maxCo 0.6`、`maxDeltaT 0.0002` 未改（`maxCo` 在 `adjustTimeStep no` 下不生效）；`endTime 0.1` 未改。
+
+**`system/fvSolution`**
+
+```foam
+PIMPLE
+{
+    momentumPredictor yes;
+    correctPhi        yes;
+    nOuterCorrectors  2;
+    nCorrectors       3;
+    nNonOrthogonalCorrectors 1;
+}
+
+p
+{
+    tolerance       1e-7;
+    relTol          0.01;
+}
+
+pFinal
+{
+    $p;
+    tolerance       1e-8;
+    relTol          0.001;
+}
+
+pcorr
+{
+    tolerance       1e-5;
+    relTol          0.01;
+}
+
+U
+{
+    tolerance       1e-7;
+    relTol          0.01;
+}
+
+UFinal
+{
+    $U;
+    relTol          0.01;
+}
+```
+
+`relaxationFactors` 暂时保持 `"U.*" 1`；如果 `nOuterCorrectors 2` 出现振荡，再加 `U 0.9`、`p 0.9`。
+
+A3 与 A0 的完整 diff 可用：
+
+```bash
+cd /home/ubuntu/shared/openfoam_fwh_m4_all_m3/system
+diff -u fvSchemes.A0 fvSchemes
+diff -u fvSolution.A0 fvSolution
+diff -u controlDict.A0 controlDict
+```
+
+### 10.6 预期、代价与验证
+
+**预期：**
+
+- dt 从 1e-5 降到 2e-6，maxCo 约 1–1.3，时间/AMI 误差应下降；如果高频 wall 明显下降，说明之前主要是时间/CFL 数值噪声。
+- `backward` 比 Euler 更准、对高频略更阻尼；`limitedLinearV 1` 比 upwind 更准、数值耗散更小。
+- 但升阶可能让 5–20 kHz 的已解析分量增加；**不要只用 wall OAP 是否下降判断成功**，还要看速度/压力谱、均值、质量流量、残差和网格/时间收敛性。
+- 若 A3 的 wall 5–20k 仍约 0.14 Pa（当前 0.145 Pa），说明高频不是由一阶格式主导，需进入 A4/A5（`corrected`、网格/AMI、LES/DES）。
+- 当前 target（§9.8）wall 5–20k ≤0.02 Pa，需要约 17 dB 下降；单靠 A3 不太可能达到，A3 是“排除格式/CFL 因素”的必要步骤。
+
+**代价：**
+
+- dt 2e-6、`endTime 0.1` = 50,000 步；按约 13.7 s/步，约 **7.9 天**。
+- 从 0 到 0.03 s（15,000 步）约 **2.4 天**，才能进入较稳定的高频统计窗口；从 0 到 0.05 s 约 **4 天**。
+- 短段稳定性测试可先跑 100–500 步（约 0.0002–0.001 s），但 wall 高频统计不足以定量。
+
+**运行：**
+
+```bash
+cd /home/ubuntu/shared/openfoam_fwh_m4_all_m3
+./Allrun
+```
+
+或先只做分解和短段：
+
+```bash
+decomposePar -force
+mpirun --oversubscribe -n 48 pimpleFoam -parallel
+```
+
+A3 使用新的 `libAcoustics.so`（2026-11-16 23:54），`fwhControl` 仍是 2 叶轮 + `laptop_wall` 7 patch。
+
+### 10.7 后续
+
+- A3 稳定后，再做 A4：`laplacian/snGrad` 改 `corrected` + `nNonOrthogonalCorrectors 2`；当前 skewness 5.58，需先确认不发散。
+- 如果 A1–A4 的 wall 5–20k 都不降，优先修 1042 个偏斜面、加密 cover、检查 AMI 权重；`laminar` 下 5–20k 可能不是可解析物理量，必要时改用 LES/DES。
+- 任何 A/B 都应固定分解、初始场和统计窗口；否则逐面 OAP 会有 0.1–0.2 dB 的“假差异”（见 §9.10 与叶轮单独对照）。
