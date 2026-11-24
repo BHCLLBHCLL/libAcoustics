@@ -1699,3 +1699,5 @@ python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
 | `hf_compare/mesh_character.py` | AMI 面类型、面积、初始对齐检查 |
 
 图：`docs/figures/`（`tone73_origin.png`、`three_cases.png`、`ami_regularity.png`、`spl_compare_big.png`）。
+`spl_compare_big.png` 里另有 **m4_m1（2 叶轮、无壁面，窗口 0.0288–0.0488 s）** 与 all_m1 同一麦克风，
+两例只差 7 个壁面，可直接读出壁面贡献：5–10k +16.1 dB、10–20k +27.8 dB、20–50k +10.6 dB。
