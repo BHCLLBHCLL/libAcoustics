@@ -1633,14 +1633,16 @@ python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
 
 ### 12.5 三算例对照：换掉 AMI 后 7.3 kHz 消失
 
-`fanonly_transient`（4.43 M 网格、多面体 AMI、matchTolerance 1e-2 + lowWeightCorrection 0.3）与
-`fanonly_steady`（3.07 M、quad AMI、matchTolerance 1e-3）是同一风扇、几乎同一麦克风位置（0.596 m / 0.595 m）。
+`fanonly_transient`（4.43 M 网格、多面体 AMI、matchTolerance 1e-2 + lowWeightCorrection 0.3，窗口 0.0649–0.0849 s，
+即第 8.5 转处的 2 转）与 `fanonly_steady`（3.07 M、quad AMI、matchTolerance 1e-3，窗口 0.0700–0.0900 s）
+是同一风扇、几乎同一麦克风位置（0.596 m / 0.595 m）。transient 的 2 ms RMS 已呈严格的一转（10 ms）周期，
+说明它已进入极限环，不是一个仍在演化的瞬态。
 
 | 指标 | fanonly_steady | fanonly_transient | all_m1 |
 |---|---:|---:|---:|
-| 7.3 kHz 峰 / dB | **45.3** | **5.1** | 72.7 |
-| 5.1 kHz 峰 / dB | 14.7 | **45.2** | 42.1 |
-| >20 kHz 能量占比 | 0.72 | **0.07** | 0.42 |
+| 7.3 kHz 峰 / dB | **45.3** | **0.9** | 72.7 |
+| 5.1 kHz 峰 / dB | 14.7 | **44.9** | 42.1 |
+| >20 kHz 能量占比 | 0.72 | **0.08** | 0.42 |
 | AMI 权重的优势阶 | 73, 146, 219 | **51, 50, 52, 102** | 73, 146, 219 |
 | AMI 主阶功率占比 | 93 % | 12 % | 93 % |
 
@@ -1672,7 +1674,7 @@ python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
 1. **7300 Hz 是 AMI 伪声，不是叶频**；"73 叶"的说法作废。凡包含该界面的算例（m1–m7、all_m1、fanonly_steady），
    做 5–20 kHz 分析时应先剔除 73 阶梳（7.3 / 14.6 / 21.9 kHz），再讨论"台阶"。
 2. 真实叶频族是 20 叶的 2 / 4 / 6 / 8 / 10 kHz；10 kHz 在细网格 transient 中被解析出来（50.7 dB，比 steady 高 25 dB）。
-3. `fanonly_transient` 把 >20 kHz 的假能量从 72 % 压到 **7 %**，是目前最实质的改善；代价是误差摊成 5.1 / 10.4 kHz 一组伪声。
+3. `fanonly_transient` 把 >20 kHz 的假能量从 72 % 压到 **8 %**，是目前最实质的改善；代价是误差摊成 5.1 / 10.4 kHz 一组伪声。
 4. 判断一个 FW-H 结果是否有 AMI 伪声，最快的判据是 `sum(weights)` 序列在转子阶次上的集中度：
    单阶 > 90 % 即窄带伪声，且"阶次 × 100 Hz"就是伪声频率。
 5. 更正一条此前的说法：transient 的"平均 Σw = 1.98"是**逐面 max 权重**的时间平均，不是 patch 平均；
