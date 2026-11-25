@@ -3,9 +3,9 @@
 > 分支：`v2412`（`origin/v2412`）
 > 基准：最初 `v2412` 为 `04f8a7a`；本文写作时的分支头为 `72eea13`，本次在其上增加 patch 表面法向修复。
 > 源码：`/home/ubuntu/programs/libAcoustics`
-> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合；2026-11-18 补充格式分析/A3；2026-11-18 补充叶轮 FW-H 数据的 FFT/A 计权/PSD 后处理；2026-11-23 补充 AMI 伪声定位与三算例对比；2026-11-25 补充 AMI 噪声改进建议）
+> 日期：2026-11-16（2026-11-17 补充实测对比、逐面 OAP/SPL/相干性分析与信息融合；2026-11-18 补充格式分析/A3；2026-11-18 补充叶轮 FW-H 数据的 FFT/A 计权/PSD 后处理；2026-11-23 补充 AMI 伪声定位与三算例对比；2026-11-25 补充 AMI 噪声改进建议；2026-11-26 补充 AMI/NCC 官方文档与文献调研）
 
-本文把八类内容分开：
+本文把九类内容分开：
 
 1. **性能分析**：最初 `v2412` 在 Windows 8 rank 算例上的平方分配、并行和内存问题；
 2. **性能与正确性修改**：当前分支已经合入的导数分配、采样、Farassat 观测网格、面速度、多面求和等；
@@ -15,6 +15,7 @@
 6. **2026-11-18 叶轮 FW-H 后处理**：对叶轮单独算例的 `acousticData/FwhImpellersFixedDelay-time.dat` 做 FFT、1/3 倍频程、A 计权和 PSD 修正，给出稳态窗口定义、OASPL 与 L_A 的差异以及可复现算法，见第 11 节。
 7. **2026-11-23 AMI 伪声定位**：7300 Hz 峰不是叶频（叶轮实测 20 叶，BPF 2 kHz），而是 cyclicAMI 插值权重的 73 次/转几何误差；三算例对照（steady / transient / all_m1）确认权重阶次与声学峰 1:1 对应，见第 12 节。
 8. **2026-11-25 AMI 噪声改进建议**：按“界面几何 → AMI/求解器设置 → 后处理”三层给出可执行措施，明确“减小 dt / 加低通”无效，并给出“权重阶次集中度 + BPF 族不变”的双判据，见第 13 节。
+9. **2026-11-26 AMI/NCC 官方文档与文献调研**：AMI 非守恒是官方定性，NCC 用交线新面保证守恒、移动界面用 `correctMeshPhi`；文献有 RBF 鬼胞通量重构（界面无虚假声波）与 Overset-vs-AMI 对比（Overset 宽带噪声更差），见第 14 节。
 
 > 注意：性能节的绝对时间来自最初的 Windows 8 rank 运行；法向节的 OAP 数据来自 Linux 48 rank 的 `openfoam_fwh_m4_all`（旧库）和 `openfoam_fwh_m4_all_m1`（新库）运行；第 9 节另用 `openfoam_fwh_m4`（叶轮单独）作基线。几套数据的网格、进程数和时间步不同，**不要直接混用绝对时间**。第 9 节的比较统一用 `0.03–0.0529 s` 公共窗口；旧数据已停止在 `0.05291 s`，新数据仍在运行。
 
@@ -36,6 +37,7 @@
 - [11. 叶轮 FW-H 后处理（2026-11-18）](#11-叶轮-fw-h-后处理2026-11-18)
 - [12. AMI 伪声：7.3 kHz 峰的真实来源（2026-11-23）](#12-ami-伪声73-khz-峰的真实来源2026-11-23)
 - [13. 消除 AMI 旋转数值噪声的建议（2026-11-25）](#13-消除-ami-旋转数值噪声的建议2026-11-25)
+- [14. AMI / NCC 旋转噪声：官方文档与文献调研（2026-11-26）](#14-ami--ncc-旋转噪声官方文档与文献调研2026-11-26)
 
 ---
 
@@ -1747,7 +1749,8 @@ python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
 ### 13.4 第二层：AMI 设置与求解器（不改网格可试）
 
 - `matchTolerance`：steady 1e-3、transient 1e-2 → 收紧到 **1e-6**。两侧点集本来就相同，收紧不会有害，但也不是主因。
-- `lowWeightCorrection 0.3`：低权重面的补权，会破坏局部守恒；匹配质量做好后应关掉或降到 0.1。
+- `lowWeightCorrection 0.3`：低于阈值的面改用本单元值（等价零梯度），**不是补权**；该面通量直接归零。
+  匹配质量做好后应关掉（见第 14.2.5 节的源码依据）。
 - AMI 方法：默认 `faceAreaWeightAMI`；界面只部分覆盖时试 `partialFaceAreaWeightAMI`；
   能做成共形时 `directAMI` 的权重恒为 1（v2412 的具体可选项以实际版本为准）。
 - 求解器：`correctPhi yes` 已开（正确）；可加 `nNonOrthogonalCorrectors 2`、收紧 pcorr 的 tolerance。
@@ -1777,3 +1780,108 @@ python3 fft_aweight_analysis.py FwhImpellersFixedDelay-time.dat \
 
 如果只能做一件事：**把界面从"过轴的薄圆盘"改成"叶尖外的圆柱面"，并让界面网格角向等分。**
 这一条同时解决轴附近退化面、切进叶尖间隙、误差非轴对称三个问题，是最可能一次见效的改动。
+
+---
+
+## 14. AMI / NCC 旋转噪声：官方文档与文献调研（2026-11-26）
+
+> 承接第 12、13 节。本节只记录可核实的官方文档与公开文献结论，以及它们对本算例
+> （ESI v2412 + libAcoustics）的适用性。
+
+### 14.1 结论摘要
+
+1. **AMI 的旋转噪声源于非守恒**，这是官方定性：AMI/ACMI 是插值方法，两侧通量不保证守恒，压力方程因此解不干净。
+2. 官方给出的替代是 **NCC（Non-Conformal Coupling）**：在两侧面交线处生成新面、两侧共用同一套面，守恒由有限体积离散本身保证。
+3. 移动 NCC 界面的噪声有专门开关：PIMPLE 的 **`correctMeshPhi yes`** + 一个宽松容差的 `MeshPhi` 求解器。官方原话：不修正这些通量会导致压力解出现噪声。
+4. 文献层面有两条：**非共形界面通量重构 + RBF 鬼胞**（针对声学，能做到界面不产生虚假声波）；以及 **Overset vs AMI** 的对比——AMI 压力场更平滑、音调更清晰，Overset 宽带噪声更高。
+5. 对本算例（ESI v2412）：NCC 在 openfoam.com 分支不可用，只能走"界面几何改造 → 调参 →（必要时）自研界面处理"。
+
+### 14.2 OpenFOAM 官方文档
+
+#### 14.2.1 AMI 与非守恒
+
+CFD Direct 对 NCC 的公告（2022-05-18）指出：AMI/ACMI 用插值把一侧的量表示成另一侧的加权和，插值速度产生的体积/质量通量不保证守恒，两侧会出现"流出 ≠ 流入"的失配；这会破坏压力方程（不可压闭域里误差绕着域转、找不到出口），并在需要有界性的场景（多相）引发不稳定。其通道算例中 AMI 的守恒误差约 0.1 %，且收敛后不归零；NCC 可忽略。
+
+链接：<https://cfd.direct/openfoam/free-software/non-conformal-coupling/>
+
+#### 14.2.2 NCC 的守恒机制
+
+NCC 先把一侧 patch 投影到另一侧、在重合面的交线处生成新面，这些面同时属于两侧的 FV 网格；网格因此是闭合的（每个单元的面法向和为 0），守恒由标准 FVM 离散保证，而不是靠加权去凑。
+
+#### 14.2.3 移动 NCC 的噪声与 correctMeshPhi
+
+官方用法文档原文：如果耦合面不能完全贴合网格运动，不修正这些通量会在压力解里产生噪声；用 PIMPLE 的 `correctMeshPhi` 开关修正，并给 `MeshPhi` 配一个宽松容差的 smooth 求解器（误差只需被摊开耗散，守恒与解析精度无关）。
+
+```
+solvers
+{
+    MeshPhi
+    {
+        solver    smoothSolver;
+        smoother  symGaussSeidel;
+        tolerance 1e-2;
+        relTol    0;
+    }
+}
+PIMPLE
+{
+    correctMeshPhi yes;
+}
+```
+
+流程：`createBaffles` → `splitBaffles` → `createNonConformalCouples`（生成零面的 `nonConformalCyclic` patch）；
+字段边界用 `#includeEtc "caseDicts/setConstraintTypes"`；全重叠界面用 `movingWallSlipVelocity` / `slip` + `fixedFluxPressure`。
+
+工具源码：<https://cpp.openfoam.org/v13/createNonConformalCouples_8C_source.html>；
+patch 类：<https://cpp.openfoam.org/v11/classFoam_1_1nonConformalCyclicPolyPatch.html>。
+
+#### 14.2.4 分支差异
+
+- **openfoam.org（Foundation）**：v11 起移除 `cyclicAMI`，改用 `nonConformalCyclic` + `createNonConformalCouples`；`correctMeshPhi` 在这个分支上。
+- **openfoam.com（ESI）**：v2412 仍是 `cyclicAMI`（本算例用的就是这个分支），公开文档中未见 `createNonConformalCouples`。
+
+迁移成本：libAcoustics 当前按 v2412 构建，换分支需要重新适配库的 API。
+
+#### 14.2.5 lowWeightCorrection 的真实语义（更正第 13.4 节）
+
+按源码（`cyclicAMIPolyPatch.C` / `AMIInterpolation.C`，ESI v2506 与 Foundation 9），`lowWeightCorrection` 默认关闭（-1）；
+设正值后，**权重和低于阈值的面不再使用邻居插值值，而改用本单元的值**，等价于该面变成零梯度——**不是重新分配权重**。
+它只适合"少数面偶尔失去重叠"，不能修复不匹配的两侧。
+
+链接：<https://cfdpilot.com/openfoam-cyclicami>
+
+### 14.3 公开文献
+
+| 文献 | 做法 | 与本文相关的结论 |
+|---|---|---|
+| S. Le Bras, H. Deniau, C. Bogey, *A flux reconstruction technique for non-conforming grid interfaces in aeroacoustic simulations*, AIAA 2016-2972 / IJNMF 2019 | 非共形界面**通量重构**：非中心格式 + 鬼胞，鬼胞值用**径向基函数（RBF）**局部无网格插值 | 二维涡对流与混合层："no significant spurious acoustic waves"；面向高阶低耗散声学格式 |
+| J. Hua, V. Golubev, A. Lyrintzis, R. Mankbadi, *A Comparative Study of Overset and AMI Methods for Propeller Noise Prediction*, VFS Forum 82 (2026) | OpenFOAM 中 Overset vs AMI，五叶螺旋桨，DDES + FW-H | AMI 压力场更平滑、音调更清晰、远场 SPL 更贴实验；Overset 因插值宽带噪声更高，首阶 BPF 误差达 22.5 dB（AMI 5.7 dB） |
+| OpenFOAM bug #887 | — | 标题即 "Conservativity Problem of AMI-Interpolation"（页面 403，未读正文，仅作线索） |
+
+链接：<https://hal.science/hal-02352878>、<https://onlinelibrary.wiley.com/doi/10.1002/fld.4767>、
+<https://proceedings.vtol.org/82/proceedingsPaper?paper=281>
+
+### 14.4 对本算例的路线图
+
+| 路线 | 内容 | 有效性 | 代价 |
+|---|---|---|---|
+| A | 界面几何改造：圆柱、外移 3–5 mm、角向等分（第 13.3 节） | 最直接，不依赖分支 | 重做网格 |
+| B | ESI 内调参：matchTolerance 1e-6、慎用 lowWeightCorrection、correctPhi 已开 | 有限，压不住 7 % 的几何误差 | 低 |
+| C | 切 Foundation v11+：NCC + `correctMeshPhi` | 官方推荐，守恒天然成立 | 需适配 libAcoustics；NCC 自身插值噪声需复核 |
+| D | RBF 鬼胞通量重构（Le Bras 路线） | 对声学最对症 | 要改求解器/插值模块 |
+| E | Overset | 不推荐 | 文献显示宽带噪声更差 |
+
+性价比顺序：**A → C → D**；B 只能把最差面的权重从 1.98 拉回接近 1，不改变 73 阶这个事实。
+
+### 14.5 落地检查清单
+
+1. **守恒基线**：算进出口流量差随时间的变化。AMI 通常停在约 0.1 % 不归零——这条曲线就是"非守恒"的直接证据，也是改造前后的对比基线。
+2. 若走 NCC：`createNonConformalCouples` → `setConstraintTypes` → `correctMeshPhi yes` + `MeshPhi` 求解器。
+3. 验收仍用第 13.1 节的双判据：`sum(weights)` 单阶功率占比 93 % → < 10 %，且 2/4/6/8 kHz 的 BPF 族不变。
+4. 新增第 4 条判据：进出口流量差的平台值应从 ~0.1 % 降到数值噪声量级。
+
+### 14.6 与第 13 节的关系
+
+- 第 13 节给的是"在现有 ESI 分支上能做的事"（几何 + 调参 + 后处理）；
+- 本节补充"换机制"的两条路（NCC、RBF 界面重构）及其代价；
+- 第 13.4 节关于 `lowWeightCorrection` 的表述按 14.2.5 更正。
